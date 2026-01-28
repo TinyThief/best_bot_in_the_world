@@ -11,12 +11,17 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+Если команда `python` не находится (Windows), используй полный путь к интерпретатору, например:
+`d:\python3.12.9\python.exe -m venv .venv` и т.д.
+
 ## Настройка
 
 1. Скопируй `.env.example` в `.env`:
+
    ```bash
    copy .env.example .env
    ```
+
 2. В `.env` укажи:
    - **BYBIT_API_KEY** / **BYBIT_API_SECRET** — для торговли (для одного чтения свечей можно оставить пустыми).
    - **BYBIT_TESTNET** — `true` для тестнета, `false` для боевой среды.
@@ -41,6 +46,16 @@ python accumulate_db.py
 python main.py
 ```
 
+**Управление через Telegram:**
+
+```bash
+python telegram_bot.py
+```
+
+Если `python` не в PATH — выполни `d:\python3.12.9\python.exe telegram_bot.py` из папки проекта.
+
+Нужен токен от [@BotFather](https://t.me/BotFather): создай бота, вставь токен в `.env` как `TELEGRAM_BOT_TOKEN`. Команды: `/start`, `/signal` — полный разбор и фазы по ТФ, `/status` — краткий статус одной строкой, `/db` — статистика БД, `/id` — твой user id для TELEGRAM_ALLOWED_IDS, `/help`. Под ответами — кнопки «Обновить» и переключение Сигнал/БД. Ограничение доступа: `TELEGRAM_ALLOWED_IDS=123,456` в `.env`.
+
 ## База данных для обучения
 
 - Файл по умолчанию: `data/klines.db` (путь задаётся в `DB_PATH`).
@@ -48,6 +63,7 @@ python main.py
 - Один запуск `accumulate_db.py`: первый проход — бэкфилл по всем ТФ из `TIMEFRAMES_DB`, затем периодическое обновление. Ключи API для чтения свечей не нужны.
 
 В `.env` для накопления можно задать:
+
 - **DB_PATH** — путь к файлу БД.
 - **TIMEFRAMES_DB** — таймфреймы через запятую, например `1,3,5,15,30,60,120,240,360,720,D,W,M`.
 - **BACKFILL_MAX_CANDLES** — максимум свечей вглубь при первом бэкфилле на один ТФ (по умолчанию 50000).
@@ -55,9 +71,12 @@ python main.py
 
 ## Версии и выгрузка в GitHub
 
+Что изменилось между версиями — в **[CHANGELOG.md](CHANGELOG.md)**.
+
 Скрипт **release.py** создаёт тег версии, при необходимости коммитит изменения и пушит ветку и теги в `origin`. Так можно откатиться на любую версию.
 
 **Первый раз:** инициализация репозитория и привязка к GitHub:
+
 ```bash
 git init
 git remote add origin https://github.com/<user>/<repo>.git
@@ -66,18 +85,22 @@ git commit -m "Initial"
 ```
 
 **Создать версию и выгрузить:**
+
 ```bash
 python release.py 1.0.0
 ```
+
 Скрипт закоммитит незакоммиченные изменения с сообщением «Release v1.0.0», создаст тег `v1.0.0` и выполнит `git push origin <текущая_ветка>` и `git push origin v1.0.0`.
 
 **Только тег** (без нового коммита): `python release.py 1.0.1 --tag-only`  
 **Локально без push:** `python release.py 1.0.0 --no-push`
 
 **Откат на прошлую версию:**
+
 ```bash
 git checkout v1.0.0
 ```
+
 Вернуться на актуальную ветку: `git checkout main` (или имя вашей ветки).
 
 **Список тегов:** `git tag -l`
@@ -86,13 +109,32 @@ git checkout v1.0.0
 
 ## Структура проекта
 
-- **config.py** — загрузка настроек из `.env` и валидация.
-- **exchange.py** — клиент Bybit: свечи (в т.ч. по start/end), бэкфилл истории.
-- **database.py** — SQLite: создание таблицы, вставка свечей, последняя свеча по паре/ТФ.
-- **accumulate_db.py** — накопление БД: бэкфилл + периодическое обновление по всем ТФ.
-- **multi_tf.py** — мультитаймфреймовый анализ: тренд по ТФ и агрегированный сигнал.
-- **main.py** — цикл опроса и логирование сигналов.
-- **release.py** — создание версий (тегов), коммит и push в GitHub; откат по тегу.
+```
+best_bot_in_the_world/
+├── src/                    # Ядро бота
+│   ├── config.py           # Настройки из .env, PROJECT_ROOT
+│   ├── exchange.py         # Клиент Bybit: свечи, бэкфилл
+│   ├── database.py         # SQLite, таблица klines
+│   ├── market_phases.py    # 6 фаз рынка
+│   ├── multi_tf.py         # МультиТФ анализ, тренды, фазы, сигнал
+│   ├── main.py              # Цикл опроса (логика)
+│   ├── accumulate_db.py   # Накопление БД (логика)
+│   ├── full_backfill.py   # Полный бэкфилл за весь период
+│   ├── test_run_once.py   # Один прогон анализа (тест)
+│   └── telegram_bot.py    # Управление через Telegram (команды /signal, /db и др.)
+├── data/                   # SQLite-база (data/klines.db), в .gitignore
+├── main.py                 # Точка входа: python main.py
+├── accumulate_db.py        # Точка входа: python accumulate_db.py
+├── full_backfill.py        # Точка входа: python full_backfill.py [--clear]
+├── telegram_bot.py         # Точка входа: python telegram_bot.py (Telegram)
+├── test_run_once.py        # Тест: python test_run_once.py
+├── release.py              # Версии и push в GitHub
+├── requirements.txt
+├── .env.example
+├── README.md
+├── AGENT_CONTEXT.md        # Контекст для AI
+└── ДЛЯ_КОМАНДЫ.md         # Онбординг для команды
+```
 
 ## Дальнейшие шаги
 

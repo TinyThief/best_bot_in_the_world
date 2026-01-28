@@ -9,7 +9,7 @@ from typing import Any
 
 from pybit.unified_trading import HTTP
 
-import config
+from . import config
 
 logger = logging.getLogger(__name__)
 
@@ -107,14 +107,15 @@ def fetch_klines_backfill(
     symbol: str,
     interval: str,
     end_ms: int,
-    max_candles: int = 100_000,
+    max_candles: int | None = 100_000,
     limit_per_request: int = 1000,
     category: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Подгружает историю свечей вглубь до end_ms, пагинируя по limit_per_request.
     Возвращает свечи в хронологическом порядке (старые → новые).
-    Останавливается при достижении max_candles или когда биржа больше не отдаёт данные.
+    Останавливается при достижении max_candles (если задан), или когда биржа больше не отдаёт данные.
+    max_candles=None — без лимита, загрузка всего доступного диапазона.
     """
     category = category or config.BYBIT_CATEGORY
     interval = str(interval).strip()
@@ -125,7 +126,7 @@ def fetch_klines_backfill(
     current_end = end_ms
     session = _session()
 
-    while len(all_rows) < max_candles:
+    while max_candles is None or len(all_rows) < max_candles:
         params = {
             "category": category,
             "symbol": symbol,
@@ -140,10 +141,11 @@ def fetch_klines_backfill(
         if not raw_list:
             break
         chunk = _parse_kline_list(raw_list)
-        # следующий запрос — строго до самой старой из полученных
         current_end = min(c["start_time"] for c in chunk) - 1
         all_rows = chunk + all_rows
         if len(chunk) < limit_per_request:
             break
+        if max_candles is not None and len(all_rows) >= max_candles:
+            break
 
-    return all_rows[:max_candles]
+    return all_rows[:max_candles] if max_candles is not None else all_rows
