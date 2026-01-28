@@ -1,10 +1,12 @@
 """
 Мультитаймфреймовый анализ: агрегация сигналов с нескольких таймфреймов.
 Тренд на старшем ТФ + 6 фаз рынка (накопление, рост, распределение, падение, капитуляция, восстановление).
+Источник свечей: DATA_SOURCE=db — из БД (по умолчанию), =exchange — запрос к Bybit на каждый тик.
 """
 from __future__ import annotations
 
 import logging
+import sqlite3
 from typing import Any
 
 from ..core import config
@@ -12,6 +14,27 @@ from ..core.exchange import get_klines_multi_timeframe
 from .market_phases import BEARISH_PHASES, BULLISH_PHASES, detect_phase
 
 logger = logging.getLogger(__name__)
+
+
+def _load_candles_from_db(
+    db_conn: sqlite3.Connection,
+    symbol: str,
+    intervals: list[str],
+    limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Загружает последние limit свечей по каждому ТФ из БД. Формат как у get_klines_multi_timeframe."""
+    from ..core.database import get_candles
+
+    cursor = db_conn.cursor()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for tf in intervals:
+        try:
+            rows = get_candles(cursor, symbol, tf, limit=limit, order_asc=False)
+            out[tf] = rows  # уже от старых к новым
+        except Exception as e:
+            logger.warning("БД ТФ %s: %s", tf, e)
+            out[tf] = []
+    return out
 
 
 def _trend_from_candles(candles: list[dict[str, Any]], lookback: int = 5) -> str:
@@ -32,14 +55,29 @@ def _trend_from_candles(candles: list[dict[str, Any]], lookback: int = 5) -> str
 def analyze_multi_timeframe(
     symbol: str | None = None,
     intervals: list[str] | None = None,
+    data_source: str | None = None,
+    db_conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
-    """Собирает данные по всем таймфреймам, тренды, 6 фаз и агрегированный сигнал."""
+    """
+    Собирает данные по всем таймфреймам, тренды, 6 фаз и агрегированный сигнал.
+    data_source: "db" | "exchange" | None (берётся из config.DATA_SOURCE).
+    db_conn: при data_source="db" — соединение с БД; иначе используется биржа.
+    """
     symbol = symbol or config.SYMBOL
     intervals = intervals or config.TIMEFRAMES
     if not intervals:
-        return {"symbol": symbol, "timeframes": {}, "higher_tf_trend": "flat", "signals": {"direction": "none", "reason": "no timeframes"}}
+        return {
+            "symbol": symbol,
+            "timeframes": {},
+            "higher_tf_trend": "flat",
+            "signals": {"direction": "none", "reason": "no timeframes", "confidence": 0.0, "confidence_level": "—"},
+        }
 
-    data = get_klines_multi_timeframe(symbol=symbol, intervals=intervals)
+    src = (data_source or getattr(config, "DATA_SOURCE", "exchange") or "exchange").lower()
+    if src == "db" and db_conn is not None:
+        data = _load_candles_from_db(db_conn, symbol, intervals, limit=config.KLINE_LIMIT or 200)
+    else:
+        data = get_klines_multi_timeframe(symbol=symbol, intervals=intervals)
     sorted_tfs = sorted(intervals, key=_tf_sort_key)
     higher_tf = sorted_tfs[-1] if sorted_tfs else None
 
@@ -81,6 +119,7 @@ def analyze_multi_timeframe(
     higher_tf_phase_score = higher_tf_data.get("phase_score", 0.0)
     phase_score_min = getattr(config, "PHASE_SCORE_MIN", 0.6)
     phase_ok = higher_tf_phase_score >= phase_score_min
+    signal_min_conf = getattr(config, "SIGNAL_MIN_CONFIDENCE", 0.0)
 
     direction = "none"
     reason = f"старший ТФ {higher_tf}: {higher_tf_trend}, фаза {higher_tf_phase_ru}"
@@ -99,6 +138,22 @@ def analyze_multi_timeframe(
         else:
             reason = f"тренд вниз, но фаза {higher_tf_phase_ru} не медвежья — осторожно с шортом"
 
+    # Уверенность сигнала 0..1: от score фазы и от совпадения тренда с фазой
+    confidence = 0.0
+    if direction != "none":
+        confidence = higher_tf_phase_score
+        if higher_tf_trend != "flat":
+            confidence = min(1.0, confidence + 0.1)
+    if confidence >= 0.7:
+        confidence_level = "strong"
+    elif confidence >= 0.5:
+        confidence_level = "medium"
+    elif confidence > 0:
+        confidence_level = "weak"
+    else:
+        confidence_level = "—"
+    above_min = confidence >= signal_min_conf
+
     return {
         "symbol": symbol,
         "timeframes": timeframes_report,
@@ -111,6 +166,9 @@ def analyze_multi_timeframe(
             "reason": reason,
             "phase_ok": phase_ok,
             "phase_score_min": phase_score_min,
+            "confidence": round(confidence, 3),
+            "confidence_level": confidence_level,
+            "above_min_confidence": above_min,
         },
     }
 

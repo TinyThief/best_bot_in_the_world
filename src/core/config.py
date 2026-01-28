@@ -35,6 +35,14 @@ POLL_INTERVAL_SEC = float(os.getenv("POLL_INTERVAL_SEC", "60"))
 # Минимальный score фазы (0..1) для использования в торговом решении. Ниже — не открываем сделку по фазе.
 # Детектор выдаёт максимум 0.7 для markup/markdown, 0.6 для recovery/accumulation/distribution; 0.8+ только у сильной капитуляции.
 PHASE_SCORE_MIN = float(os.getenv("PHASE_SCORE_MIN", "0.6"))
+# Источник свечей для анализа: "db" — из локальной БД (меньше запросов к бирже), "exchange" — каждый тик с Bybit.
+_ds = os.getenv("DATA_SOURCE", "db").strip().lower()
+DATA_SOURCE = _ds if _ds in ("db", "exchange") else "db"
+# Минимальная уверенность сигнала (0..1): ниже — «слабый» сигнал (в логах/фильтрах). Порог для будущих авто-сделок.
+SIGNAL_MIN_CONFIDENCE = float(os.getenv("SIGNAL_MIN_CONFIDENCE", "0"))
+# Ретраи запросов к Bybit: макс попыток, базовая задержка (с) при rate limit / сетевой ошибке
+EXCHANGE_MAX_RETRIES = int(os.getenv("EXCHANGE_MAX_RETRIES", "5"))
+EXCHANGE_RETRY_BACKOFF_SEC = float(os.getenv("EXCHANGE_RETRY_BACKOFF_SEC", "1"))
 
 # --- База для обучения ---
 _db_path_env = os.getenv("DB_PATH")

@@ -33,13 +33,16 @@ def _log_report(report: dict[str, Any]) -> None:
         phase_ru = data.get("phase_ru", "—")
         n = len(data.get("candles", []))
         logger.info("  ТФ %s: тренд=%s, фаза=%s, свечей=%s", tf, trend, phase_ru, n)
+    conf = report["signals"].get("confidence", 0)
+    conf_lvl = report["signals"].get("confidence_level", "—")
+    logger.info("  Уверенность: %s (%s)", conf, conf_lvl)
     # Компактная строка в signals.log для разбора и статистики
     try:
         from ..core.logging_config import get_signals_logger
         sig = get_signals_logger()
         sig.info(
-            "direction=%s | reason=%s | higher_tf_trend=%s | higher_tf_phase=%s",
-            direction, reason, higher_trend, higher_phase,
+            "direction=%s | confidence=%s | %s | reason=%s | higher_tf_trend=%s | higher_tf_phase=%s",
+            direction, conf, conf_lvl, reason, higher_trend, higher_phase,
         )
     except Exception:  # не ломаем тик из-за логгера
         pass
@@ -51,6 +54,6 @@ def run_one_tick(db_conn: sqlite3.Connection | None, last_db_ts: float) -> float
     Возвращает актуальную метку времени последнего обновления БД.
     """
     last_db_ts = refresh_if_due(db_conn, last_db_ts)
-    report = analyze_multi_timeframe()
+    report = analyze_multi_timeframe(db_conn=db_conn)
     _log_report(report)
     return last_db_ts

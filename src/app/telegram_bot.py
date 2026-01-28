@@ -132,23 +132,27 @@ def _split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list[str]:
     return chunks
 
 
-def _get_signal_text() -> str:
-    """Синхронный запрос анализа и форматирование текста для Telegram (с эмодзи)."""
+def _get_signal_text(db_conn=None) -> str:
+    """Синхронный запрос анализа и форматирование текста для Telegram (с эмодзи). db_conn — для DATA_SOURCE=db."""
     try:
-        r = analyze_multi_timeframe()
+        r = analyze_multi_timeframe(db_conn=db_conn)
         direction = (r["signals"].get("direction") or "none").lower()
         emoji_dir = DIR_EMOJI.get(direction, direction.upper())
+        conf = r["signals"].get("confidence")
+        conf_lvl = r["signals"].get("confidence_level", "—")
         tfs = r.get("timeframes") or {}
         higher_tf_key = list(tfs)[-1] if tfs else None
         higher_label = _tf_label(higher_tf_key or "")
         lines = [
             f"Сигнал: {emoji_dir}",
+            f"Уверенность: {conf} ({conf_lvl})" if conf is not None else "",
             f"Причина: {r['signals'].get('reason', '—')}",
             "",
             f"Старший таймфрейм ({higher_label}): тренд {r.get('higher_tf_trend', '?')}, фаза {r.get('higher_tf_phase_ru', '—')}",
             "",
             "По таймфреймам:",
         ]
+        lines = [x for x in lines if x]
         for tf, d in tfs.items():
             trend = d.get("trend", "?")
             phase = d.get("phase_ru", "—")
@@ -162,18 +166,19 @@ def _get_signal_text() -> str:
         return f"Ошибка: {e}"
 
 
-def _get_status_text() -> str:
-    """Одна строка: сигнал + пара + старший таймфрейм."""
+def _get_status_text(db_conn=None) -> str:
+    """Одна строка: сигнал + пара + старший таймфрейм + уверенность. db_conn — для DATA_SOURCE=db."""
     try:
-        r = analyze_multi_timeframe()
+        r = analyze_multi_timeframe(db_conn=db_conn)
         direction = (r["signals"].get("direction") or "none").lower()
         emoji_dir = DIR_EMOJI.get(direction, direction.upper())
+        conf_lvl = r["signals"].get("confidence_level", "—")
         tfs = r.get("timeframes") or {}
         higher_tf_key = list(tfs)[-1] if tfs else None
         higher_label = _tf_label(higher_tf_key or "")
         trend = r.get("higher_tf_trend", "?")
         phase_ru = r.get("higher_tf_phase_ru", "—")
-        return f"{emoji_dir}  |  {config.SYMBOL}  |  {higher_label}: {trend}, {phase_ru}"
+        return f"{emoji_dir}  |  {config.SYMBOL}  |  {higher_label}: {trend}, {phase_ru}  |  уверенность: {conf_lvl}"
     except Exception as e:
         logger.exception("Ошибка при запросе status: %s", e)
         return f"Ошибка: {e}"
@@ -245,11 +250,12 @@ def _resolve_chat_id(chat_or_message) -> int:
     return chat_or_message.id
 
 
-async def _reply_signal(chat_or_message, bot, send_action=True) -> None:
+async def _reply_signal(chat_or_message, bot, context=None, send_action=True) -> None:
     chat_id = _resolve_chat_id(chat_or_message)
     if send_action and hasattr(chat_or_message, "reply_chat_action"):
         await chat_or_message.reply_chat_action("typing")
-    text = await asyncio.to_thread(_get_signal_text)
+    db_conn = context.application.bot_data.get("db_conn") if context else None
+    text = await asyncio.to_thread(_get_signal_text, db_conn)
     await _send_long_with_inline(bot, chat_id, text, "signal")
 
 
@@ -290,7 +296,7 @@ async def cmd_signal(update, context) -> None:
     if not _check_allowed(_get_user_id(update)):
         await update.message.reply_text("Доступ запрещён.")
         return
-    await _reply_signal(update.message, context.bot)
+    await _reply_signal(update.message, context.bot, context=context)
 
 
 async def cmd_status(update, context) -> None:
@@ -298,7 +304,8 @@ async def cmd_status(update, context) -> None:
         await update.message.reply_text("Доступ запрещён.")
         return
     await update.message.reply_chat_action("typing")
-    text = await asyncio.to_thread(_get_status_text)
+    db_conn = context.application.bot_data.get("db_conn") if context else None
+    text = await asyncio.to_thread(_get_status_text, db_conn)
     await update.message.reply_text(text)
 
 
@@ -334,7 +341,7 @@ async def handle_callback(update, context) -> None:
     bot = context.bot
     data = q.data
     if data == CB_SIGNAL:
-        await _reply_signal(chat, bot, send_action=True)
+        await _reply_signal(chat, bot, context=context, send_action=True)
     elif data == CB_DB:
         await _reply_db(chat, bot, send_action=True)
     elif data == CB_REFRESH_SIGNAL:
@@ -342,7 +349,7 @@ async def handle_callback(update, context) -> None:
             await q.edit_message_text("Обновляю сигнал…")
         except Exception:
             pass
-        await _reply_signal(chat, bot, send_action=False)
+        await _reply_signal(chat, bot, context=context, send_action=False)
         try:
             await q.message.delete()
         except Exception:
@@ -449,6 +456,7 @@ def run_bot() -> None:
     app.add_handler(MessageHandler(filters.TEXT & btn_filter, handle_keyboard_button))
 
     db_conn = open_and_prepare()
+    app.bot_data["db_conn"] = db_conn
     if db_conn is not None:
         last_db_ts: list[float] = [time.time()]
 

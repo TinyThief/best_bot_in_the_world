@@ -4,6 +4,26 @@
 
 ---
 
+## [2.1.0] — 2026-01-28
+
+Промежуточная версия: анализ из БД, ретраи API, уверенность сигнала, расширенный check_all.
+
+### Добавлено
+
+- **Источник свечей для анализа (DATA_SOURCE)** — при `db` анализ читает из локальной БД (меньше запросов к Bybit), при `exchange` — запрос на каждый тик. По умолчанию `db`. В `analyze_multi_timeframe` добавлены аргументы `data_source` и `db_conn`.
+- **Ретраи и учёт rate limit в exchange** — обёртка `_request_kline()` с повторными попытками при кодах 10006/10007, таймаутах и сетевых сбоях. Настройки `EXCHANGE_MAX_RETRIES`, `EXCHANGE_RETRY_BACKOFF_SEC` в .env.
+- **Уверенность сигнала** — в ответе `signals` добавлены `confidence` (0..1), `confidence_level` (weak/medium/strong), `above_min_confidence`. Порог задаётся через `SIGNAL_MIN_CONFIDENCE`. Отображается в логах, в `signals.log` и в Telegram (/signal, /status).
+- **Расширенный check_all.py** — 14 проверок: .env, конфиг и пороги, соответствие TIMEFRAMES и TIMEFRAMES_DB при DATA_SOURCE=db, БД и подсчёт по ТФ, пинг Bybit, multi_tf с биржи и из БД, логирование, ретраи, Telegram, скрипты, модули app. Флаги `--quick` (без сетевых проверок) и `-v` (тайминги и детали).
+
+### Изменено
+
+- **multi_tf** — при переданном `db_conn` и `DATA_SOURCE=db` загрузка свечей из БД через `_load_candles_from_db()`.
+- **bot_loop** — вызов `analyze_multi_timeframe(db_conn=db_conn)`; в лог и в signals.log добавлены confidence и confidence_level.
+- **Telegram-бот** — передача `db_conn` в запросы сигнала/статуса через `bot_data`, отображение уверенности в ответах.
+- В **config** добавлены `DATA_SOURCE`, `SIGNAL_MIN_CONFIDENCE`, `EXCHANGE_MAX_RETRIES`, `EXCHANGE_RETRY_BACKOFF_SEC`. В `.env.example` и ДЛЯ_КОМАНДЫ.md — описание новых переменных.
+
+---
+
 ## [2.0.0] — 2026-01-28
 
 ### Чем отличается от v1.0.0
@@ -57,4 +77,5 @@
 - Конфиг через `.env`, проверка через `check_all.py`.
 
 [2.0.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v1.0.0...v2.0.0
+[2.1.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.0.0...v2.1.0
 [1.0.0]: https://github.com/TinyThief/best_bot_in_the_world/releases/tag/v1.0.0
