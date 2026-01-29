@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 
 from ..core import config
@@ -140,26 +141,60 @@ def _get_signal_text(db_conn=None) -> str:
         emoji_dir = DIR_EMOJI.get(direction, direction.upper())
         conf = r["signals"].get("confidence")
         conf_lvl = r["signals"].get("confidence_level", "—")
+        phase_ready = r["signals"].get("phase_decision_ready", False)
         tfs = r.get("timeframes") or {}
         higher_tf_key = list(tfs)[-1] if tfs else None
         higher_label = _tf_label(higher_tf_key or "")
+        entry_score = r["signals"].get("entry_score")
         lines = [
             f"Сигнал: {emoji_dir}",
             f"Уверенность: {conf} ({conf_lvl})" if conf is not None else "",
+            f"Единый score входа: {entry_score}" if entry_score is not None else "",
+            f"Готов к решению: {'да' if phase_ready else 'нет'}",
             f"Причина: {r['signals'].get('reason', '—')}",
             "",
-            f"Старший таймфрейм ({higher_label}): тренд {r.get('higher_tf_trend', '?')}, фаза {r.get('higher_tf_phase_ru', '—')}",
-            "",
-            "По таймфреймам:",
+            f"Старший ТФ ({higher_label}): тренд {r.get('higher_tf_trend', '?')} ({r.get('higher_tf_trend_ru', '—')}), фаза {r.get('higher_tf_phase_ru', '—')}",
         ]
+        regime_ru = r.get("higher_tf_regime_ru") or "—"
+        regime_ok = r.get("regime_ok", True)
+        candle_ok = r.get("candle_quality_ok", True)
+        lines.append(f"  Режим: {regime_ru}, ок={regime_ok} | Качество свечей: {'ок' if candle_ok else 'низкое'}")
+        trend_str = r.get("higher_tf_trend_strength")
+        trend_conf = r.get("higher_tf_trend_confidence")
+        trend_unclear = r.get("higher_tf_trend_unclear", True)
+        if trend_str is not None or trend_conf is not None:
+            parts = []
+            if trend_str is not None:
+                parts.append(f"сила={trend_str:.2f}")
+            if trend_conf is not None:
+                parts.append(f"уверенность={trend_conf * 100:.0f}%")
+            parts.append("неясен" if trend_unclear else "ясен")
+            lines.append(f"  Тренд: {', '.join(parts)}")
+        phase_unclear = r.get("higher_tf_phase_unclear", True)
+        phase_stable = r.get("higher_tf_phase_stable", False)
+        score_gap = r.get("higher_tf_score_gap")
+        sec_phase = r.get("higher_tf_secondary_phase_ru") or "—"
+        phase_parts = [f"вторая={sec_phase}"]
+        if score_gap is not None:
+            phase_parts.append(f"разрыв={score_gap:.2f}")
+        phase_parts.append(f"неясна={phase_unclear}, устойчива={phase_stable}")
+        lines.append("  Фаза: " + ", ".join(phase_parts))
+        lines.extend(["", "По таймфреймам:"])
         lines = [x for x in lines if x]
         for tf, d in tfs.items():
             trend = d.get("trend", "?")
+            trend_s = d.get("trend_strength")
+            trend_c = d.get("trend_confidence")
             phase = d.get("phase_ru", "—")
             score = d.get("phase_score")
             score_str = f" ({score:.2f})" if score is not None else ""
             n = len(d.get("candles", []))
-            lines.append(f"  {_tf_label(tf)}: тренд={trend}, фаза={phase}{score_str}, свечей={n}")
+            reg = d.get("regime_ru") or "—"
+            q_ok = d.get("candle_quality_ok", True)
+            trend_extra = ""
+            if trend_s is not None and trend_c is not None:
+                trend_extra = f", тренд уверенность={trend_c * 100:.0f}%"
+            lines.append(f"  {_tf_label(tf)}: тренд={trend}{f' (сила={trend_s:.2f})' if trend_s is not None else ''}, фаза={phase}{score_str}, режим={reg}, качество={'ок' if q_ok else 'низкое'}{trend_extra}, свечей={n}")
         return "\n".join(lines)
     except Exception as e:
         logger.exception("Ошибка при запросе сигнала: %s", e)
@@ -178,7 +213,10 @@ def _get_status_text(db_conn=None) -> str:
         higher_label = _tf_label(higher_tf_key or "")
         trend = r.get("higher_tf_trend", "?")
         phase_ru = r.get("higher_tf_phase_ru", "—")
-        return f"{emoji_dir}  |  {config.SYMBOL}  |  {higher_label}: {trend}, {phase_ru}  |  уверенность: {conf_lvl}"
+        regime_ru = r.get("higher_tf_regime_ru") or "—"
+        entry_score = r["signals"].get("entry_score")
+        entry_str = f"  score={entry_score}" if entry_score is not None else ""
+        return f"{emoji_dir}  |  {config.SYMBOL}  |  {higher_label}: {trend}, {phase_ru}, режим {regime_ru}{entry_str}  |  {conf_lvl}"
     except Exception as e:
         logger.exception("Ошибка при запросе status: %s", e)
         return f"Ошибка: {e}"
@@ -303,10 +341,13 @@ async def cmd_status(update, context) -> None:
     if not _check_allowed(_get_user_id(update)):
         await update.message.reply_text("Доступ запрещён.")
         return
-    await update.message.reply_chat_action("typing")
+    msg = await update.message.reply_text("Считаю…")
     db_conn = context.application.bot_data.get("db_conn") if context else None
     text = await asyncio.to_thread(_get_status_text, db_conn)
-    await update.message.reply_text(text)
+    try:
+        await msg.edit_text(text)
+    except Exception:
+        await update.message.reply_text(text)
 
 
 async def cmd_db(update, context) -> None:
@@ -389,13 +430,26 @@ async def handle_keyboard_button(update, context) -> None:
             await update.message.reply_text("Панель скрыта. /start — показать снова.")
 
 
-def run_bot() -> None:
-    """Запуск поллинга Telegram-бота. Один экземпляр на один токен."""
+def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
+    """
+    Запуск поллинга Telegram-бота. Один экземпляр на один токен.
+
+    db_conn: если передан (например из main.py), используется общее соединение с БД,
+    обновление БД не запускается (им управляет основной бот), в finally соединение не закрывается.
+    Если None — вызывается open_and_prepare(), запускается периодическое обновление БД, в finally — close().
+    """
     if not config.TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN не задан. "
             "Создай бота в Telegram через @BotFather, скопируй токен в .env: TELEGRAM_BOT_TOKEN=твой_токен"
         )
+
+    # В потоке без своего event loop APScheduler/get_event_loop() падают (Python 3.10+).
+    # Устанавливаем loop для текущего потока, если его ещё нет.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     import pytz
     import apscheduler.util as _aps_util
@@ -455,9 +509,12 @@ def run_bot() -> None:
     )
     app.add_handler(MessageHandler(filters.TEXT & btn_filter, handle_keyboard_button))
 
-    db_conn = open_and_prepare()
+    own_conn = False
+    if db_conn is None:
+        db_conn = open_and_prepare()
+        own_conn = True
     app.bot_data["db_conn"] = db_conn
-    if db_conn is not None:
+    if db_conn is not None and own_conn:
         last_db_ts: list[float] = [time.time()]
 
         async def _db_refresh_job(context) -> None:
@@ -469,11 +526,12 @@ def run_bot() -> None:
             first=min(10, max(1, int(config.DB_UPDATE_INTERVAL_SEC))),
         )
         logger.info("БД будет обновляться каждые %s с", config.DB_UPDATE_INTERVAL_SEC)
-    else:
+    elif db_conn is None:
         logger.info("TIMEFRAMES_DB пуст — обновление БД отключено")
 
     logger.info("Telegram-бот запущен. Остановка: Ctrl+C.")
     try:
         app.run_polling(allowed_updates=["message", "callback_query"])
     finally:
-        close(db_conn)
+        if own_conn:
+            close(db_conn)

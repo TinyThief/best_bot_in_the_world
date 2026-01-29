@@ -4,6 +4,38 @@
 
 ---
 
+## [Unreleased]
+
+- *(пока пусто)*
+
+---
+
+## [2.3.0] — 2026-01-28
+
+Промежуточная версия: тренд и режим рынка, единый score входа, качество свечей, расширенный check_all, Telegram (режим/score/качество).
+
+### Добавлено
+
+- **Модуль тренда и режима рынка (market_trend.py):** `detect_trend()` — агрегация структуры (HH/HL, LH/LL), EMA-стек, ADX (+DI/-DI), силы тренда, VWAP, OBV slope, return 5/20; возвращает direction (up/down/flat), strength, trend_unclear, secondary_direction, strength_gap. `detect_regime()` — режим рынка (тренд/диапазон/всплеск) по ADX, ATR и ширине Bollinger Bands.
+- **Режим рынка в multi_tf:** по каждому ТФ считается режим (trend/range/surge); по старшему ТФ — фильтр `REGIME_BLOCK_SURGE` (1 = не входить при режиме «всплеск»). В отчёт и лог добавлены higher_tf_regime, regime_ru, regime_ok, по ТФ — regime, regime_ru.
+- **Фильтры входа в phase_decision_ready:** объём относительно MA(vol) — `VOLUME_MIN_RATIO`; ATR относительно MA(ATR) — `ATR_MAX_RATIO`; расстояние цены до свинг-уровней — `LEVEL_MAX_DISTANCE_PCT`; минимум ТФ, совпадающих по тренду и фазе со старшим — `TF_ALIGN_MIN`; устойчивость фазы и тренда (PHASE_STABILITY_MIN, TREND_STABILITY_MIN, PHASE_HISTORY_SIZE).
+- **Усиление фаз:** phase_unclear, score_gap, secondary_phase; свинг-уровни (swing_levels) для поддержки/сопротивления; конфиг PHASE_UNCLEAR_THRESHOLD, PHASE_MIN_GAP.
+- **Telegram-бот из main.py:** при заданном TELEGRAM_BOT_TOKEN бот запускается в отдельном потоке с общим соединением с БД; отдельный процесс `python telegram_bot.py` по-прежнему поддерживается.
+- **Бэктест тренда:** скрипт `backtest_trend.py` (лаунчер в корне) для проверки точности модуля тренда по БД.
+- **Единый score входа (0..1):** взвешенная сумма фазы старшего ТФ, силы тренда и доли совпадающих ТФ; бонус за устойчивость. Конфиг: ENTRY_SCORE_WEIGHT_PHASE, ENTRY_SCORE_WEIGHT_TREND, ENTRY_SCORE_WEIGHT_TF_ALIGN. confidence в сигнале = entry_score при наличии направления.
+- **Проверка качества свечей:** модуль `src/utils/candle_quality.py` — валидация OHLCV (структура, OHLC-логика, NaN/None, объём). В multi_tf по каждому ТФ используются отфильтрованные свечи; при CANDLE_QUALITY_MIN_SCORE > 0 низкое качество блокирует phase_decision_ready.
+
+### Изменено
+
+- **multi_tf.py** — тренд по ТФ через `detect_trend()` (market_trend); режим по ТФ через `detect_regime()`; phase_decision_ready учитывает фильтры объёма, ATR, уровней, совпадения ТФ, режима «всплеск» и устойчивость фазы/тренда; в отчёт добавлены regime, trend_stability, phase_stability, filters_ok, tf_align_ok, regime_ok.
+- **bot_loop.py** — в лог добавлены режим по старшему ТФ и по каждому ТФ.
+- **config.py** — добавлены VOLUME_MIN_RATIO, ATR_MAX_RATIO, TF_ALIGN_MIN, TREND_STABILITY_MIN, LEVEL_MAX_DISTANCE_PCT, REGIME_BLOCK_SURGE, ENTRY_SCORE_WEIGHT_*, CANDLE_QUALITY_MIN_SCORE; пороги фаз и тренда (PHASE_UNCLEAR_THRESHOLD, PHASE_MIN_GAP, PHASE_STABILITY_MIN, PHASE_HISTORY_SIZE, TREND_*).
+- **multi_tf.py** — единый entry_score, проверка качества свечей по каждому ТФ, candle_quality_ok в phase_decision_ready.
+- **Документация** — AGENT_CONTEXT.md, ДЛЯ_КОМАНДЫ.md, README.md актуализированы: модуль тренда, режим рынка, фильтры, единый score, качество свечей, запуск Telegram из main, backtest_trend, таблица .env.
+- **check_all.py** — проверки порогов (CANDLE_QUALITY_MIN_SCORE, веса entry_score, TF_ALIGN_MIN), структуры отчёта multi_tf (entry_score, higher_tf_regime, candle_quality_ok), модулей анализа (market_trend, candle_quality), скриптов (backtest_trend, compare_phase_methods).
+
+---
+
 ## [2.2.0] — 2026-01-28
 
 Промежуточная версия: метрики фаз (EMA, ADX, BB, OBV, VWAP), усиление Вайкоффа, три модуля фаз для сравнения.
@@ -95,7 +127,9 @@
 - Структура: `src/core`, `src/analysis`, `src/app`, `src/scripts`; лаунчеры в корне.
 - Конфиг через `.env`, проверка через `check_all.py`.
 
+[Unreleased]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.3.0...HEAD
 [2.0.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v1.0.0...v2.0.0
 [2.1.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.0.0...v2.1.0
 [2.2.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.1.0...v2.2.0
+[2.3.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.2.0...v2.3.0
 [1.0.0]: https://github.com/TinyThief/best_bot_in_the_world/releases/tag/v1.0.0

@@ -17,10 +17,10 @@ alwaysApply: true
 best_bot_in_the_world/
 ├── src/
 │   ├── core/           # config, database, exchange, logging_config
-│   ├── analysis/       # market_phases, multi_tf; phase_wyckoff, phase_indicators, phase_structure (сравнение)
+│   ├── analysis/       # market_phases, market_trend (тренд, режим рынка), multi_tf; phase_* (сравнение)
 │   ├── app/            # main, bot_loop, db_sync, telegram_bot
-│   ├── scripts/        # accumulate_db, backtest_phases, compare_phase_methods, full_backfill, test_run_once
-│   └── utils/          # validators, helpers (расширять по мере надобности)
+│   ├── scripts/        # accumulate_db, backtest_phases, backtest_trend, compare_phase_methods, full_backfill, test_run_once
+│   └── utils/          # validators, helpers, candle_quality
 ├── strategies/         # будущие стратегии (trend_following, scalping и т.д.)
 ├── tests/
 │   ├── unit/

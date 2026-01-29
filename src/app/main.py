@@ -1,9 +1,11 @@
 """
 Точка входа мультитаймфреймового торгового бота для Bybit.
 Только цикл и запуск: конфиг, подготовка БД, вызов bot_loop.run_one_tick, пауза, завершение.
-Вся логика «тик бота» и анализа — в bot_loop и db_sync.
+Telegram-бот (если задан TELEGRAM_BOT_TOKEN) запускается в отдельном потоке и использует то же соединение с БД.
 """
+import asyncio
 import logging
+import threading
 import time
 
 from ..core import config
@@ -31,6 +33,23 @@ def main() -> None:
         )
     else:
         logger.info("TIMEFRAMES_DB пуст — обновление БД отключено")
+
+    telegram_thread = None
+    if config.TELEGRAM_BOT_TOKEN:
+        from .telegram_bot import run_bot
+
+        def _run_telegram_in_thread(db_conn):
+            # В новом потоке нет event loop; APScheduler/python-telegram-bot вызывают get_event_loop().
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            run_bot(db_conn=db_conn)
+
+        telegram_thread = threading.Thread(
+            target=_run_telegram_in_thread,
+            kwargs={"db_conn": db_conn},
+            daemon=True,
+        )
+        telegram_thread.start()
+        logger.info("Telegram-бот запущен от основного бота (общее соединение с БД)")
 
     logger.info(
         "Старт бота | пара=%s | таймфреймы=%s | интервал опроса=%s с",

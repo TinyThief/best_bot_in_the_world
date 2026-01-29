@@ -76,12 +76,22 @@ def check_config_bounds() -> CheckResult:
             issues.append("PHASE_SCORE_MIN не в [0,1]")
         if not (0 <= getattr(_config, "SIGNAL_MIN_CONFIDENCE", 0) <= 1):
             issues.append("SIGNAL_MIN_CONFIDENCE не в [0,1]")
+        if not (0 <= getattr(_config, "CANDLE_QUALITY_MIN_SCORE", 0) <= 1):
+            issues.append("CANDLE_QUALITY_MIN_SCORE не в [0,1]")
         ds = getattr(_config, "DATA_SOURCE", "db")
         if ds not in ("db", "exchange"):
             issues.append(f"DATA_SOURCE={ds!r}, ожидается db или exchange")
+        w_phase = getattr(_config, "ENTRY_SCORE_WEIGHT_PHASE", 0.4)
+        w_trend = getattr(_config, "ENTRY_SCORE_WEIGHT_TREND", 0.35)
+        w_tf = getattr(_config, "ENTRY_SCORE_WEIGHT_TF_ALIGN", 0.25)
+        if w_phase < 0 or w_trend < 0 or w_tf < 0:
+            issues.append("веса ENTRY_SCORE_WEIGHT_* не должны быть отрицательными")
+        if getattr(_config, "TF_ALIGN_MIN", 1) < 0:
+            issues.append("TF_ALIGN_MIN должен быть >= 0")
         if issues:
             return _fail("значения вне диапазона", "; ".join(issues))
-        return _ok("PHASE_SCORE_MIN, SIGNAL_MIN_CONFIDENCE, DATA_SOURCE в норме", f"DATA_SOURCE={ds}")
+        detail = f"DATA_SOURCE={ds}, entry_score веса ок, CANDLE_QUALITY_MIN_SCORE ок"
+        return _ok("пороги конфига в норме", detail)
     except Exception as e:
         return _fail("проверка порогов", str(e))
 
@@ -174,13 +184,22 @@ def check_multi_tf_exchange() -> CheckResult:
         r = analyze_multi_timeframe()  # без db_conn → exchange при наличии DATA_SOURCE
         if "signals" not in r or "timeframes" not in r:
             return _fail("неожиданная структура ответа", str(list(r.keys())))
-        direction = r["signals"].get("direction", "?")
+        sig = r["signals"]
+        direction = sig.get("direction", "?")
         tfs = list((r.get("timeframes") or {}).keys())
-        confidence = r["signals"].get("confidence")
-        detail = f"direction={direction}, TFs={tfs}"
-        if confidence is not None:
-            detail += f", confidence={confidence}"
-        return _ok(f"direction={direction}, TFs={tfs}", detail)
+        missing = []
+        if "entry_score" not in sig:
+            missing.append("signals.entry_score")
+        if "higher_tf_regime" not in r:
+            missing.append("higher_tf_regime")
+        if "candle_quality_ok" not in r:
+            missing.append("candle_quality_ok")
+        if missing:
+            return _warn(f"в отчёте нет полей: {', '.join(missing)}", str(list(r.keys())))
+        entry_score = sig.get("entry_score")
+        regime = r.get("higher_tf_regime", "?")
+        detail = f"direction={direction}, TFs={tfs}, entry_score={entry_score}, regime={regime}"
+        return _ok(f"direction={direction}, TFs={tfs}, entry_score ок, regime ок", detail)
     except Exception as e:
         return _fail("multi_tf / exchange", str(e))
 
@@ -200,7 +219,10 @@ def check_multi_tf_db() -> CheckResult:
         if "signals" not in r:
             return _fail("multi_tf(db): неверная структура", str(list(r.keys())))
         direction = r["signals"].get("direction", "?")
-        return _ok(f"multi_tf (db): direction={direction}", None)
+        entry_score = r["signals"].get("entry_score")
+        regime = r.get("higher_tf_regime", "?")
+        detail = f"direction={direction}, entry_score={entry_score}, regime={regime}"
+        return _ok(f"multi_tf (db): direction={direction}", detail)
     except Exception as e:
         return _fail("multi_tf из БД", str(e))
 
@@ -238,18 +260,30 @@ def check_telegram() -> CheckResult:
 
 
 def check_scripts() -> CheckResult:
-    """Импорт скриптов: accumulate_db, full_backfill, backtest_phases, test_run_once."""
+    """Импорт скриптов: accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once."""
     try:
-        from src.scripts import accumulate_db, full_backfill, backtest_phases, test_run_once
+        from src.scripts import (
+            accumulate_db,
+            full_backfill,
+            backtest_phases,
+            backtest_trend,
+            compare_phase_methods,
+            test_run_once,
+        )
         ok = (
             hasattr(accumulate_db, "main")
             and hasattr(full_backfill, "main")
             and hasattr(backtest_phases, "main")
+            and hasattr(backtest_trend, "main")
+            and hasattr(compare_phase_methods, "main")
             and hasattr(test_run_once, "run")
         )
         if not ok:
             return _fail("у скриптов нет main/run", None)
-        return _ok("accumulate_db, full_backfill, backtest_phases, test_run_once", None)
+        return _ok(
+            "accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once",
+            None,
+        )
     except Exception as e:
         return _fail("импорт скриптов", str(e))
 
@@ -265,6 +299,22 @@ def check_app_modules() -> CheckResult:
         return _ok("db_sync, bot_loop импортируются", None)
     except Exception as e:
         return _fail("импорт app-модулей", str(e))
+
+
+def check_analysis_modules() -> CheckResult:
+    """Модули анализа: market_trend (detect_trend, detect_regime), candle_quality (validate_candles)."""
+    try:
+        from src.analysis.market_trend import detect_trend, detect_regime
+        from src.utils.candle_quality import validate_candles
+        if not callable(detect_trend) or not callable(detect_regime):
+            return _fail("market_trend: detect_trend/detect_regime не вызываемые", None)
+        if not callable(validate_candles):
+            return _fail("candle_quality: validate_candles не вызываемая", None)
+        return _ok("market_trend (detect_trend, detect_regime), candle_quality (validate_candles)", None)
+    except ImportError as e:
+        return _fail("импорт модулей анализа", str(e))
+    except Exception as e:
+        return _fail("проверка модулей анализа", str(e))
 
 
 def check_exchange_retry_config() -> CheckResult:
@@ -311,6 +361,7 @@ def main() -> int:
         ("Bybit API", check_bybit_ping),
         ("multi_tf (exchange)", check_multi_tf_exchange),
         ("multi_tf (db)", check_multi_tf_db),
+        ("Модули анализа", check_analysis_modules),
         ("Логирование", check_logging),
         ("Ретраи Bybit", check_exchange_retry_config),
         ("Telegram-бот", check_telegram),

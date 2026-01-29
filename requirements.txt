@@ -12,5 +12,3 @@ numpy>=1.24.0
 python-telegram-bot>=21.0
 pytz  # для APScheduler/JobQueue (часы и отложенные задачи)
 
-# Логирование (при желании можно заменить на loguru)
-# loguru>=0.7.0

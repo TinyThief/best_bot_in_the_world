@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..core import config
+
 logger = logging.getLogger(__name__)
 
 # Идентификаторы и русские названия фаз
@@ -513,6 +515,38 @@ def _structure(candles: list[dict[str, Any]], pivots: int = 5) -> str:
     return "range"
 
 
+def swing_levels(candles: list[dict[str, Any]], pivots: int = 5) -> dict[str, Any]:
+    """
+    Уровни по свинг-точкам (те же, что в _structure): последние pivots минимумов и максимумов по окнам.
+    Возвращает: swing_low, swing_high, close, distance_to_support_pct, distance_to_resistance_pct.
+    distance_to_support_pct = (close - swing_low) / swing_low; > 0 — цена выше поддержки.
+    distance_to_resistance_pct = (swing_high - close) / close; > 0 — цена ниже сопротивления.
+    """
+    if not candles or len(candles) < pivots * 2:
+        return {}
+    lows = [c["low"] for c in candles]
+    highs = [c["high"] for c in candles]
+    step = max(1, len(lows) // pivots)
+    last_lows = [min(lows[i : i + step]) for i in range(0, len(lows) - step + 1, step)][-pivots:]
+    last_highs = [max(highs[i : i + step]) for i in range(0, len(highs) - step + 1, step)][-pivots:]
+    if not last_lows or not last_highs:
+        return {}
+    swing_low = min(last_lows)
+    swing_high = max(last_highs)
+    close = candles[-1]["close"]
+    if swing_low <= 0:
+        return {"swing_low": swing_low, "swing_high": swing_high, "close": close}
+    dist_support = (close - swing_low) / swing_low if swing_low > 0 else None
+    dist_resistance = (swing_high - close) / close if close > 0 else None
+    return {
+        "swing_low": swing_low,
+        "swing_high": swing_high,
+        "close": close,
+        "distance_to_support_pct": round(dist_support, 4) if dist_support is not None else None,
+        "distance_to_resistance_pct": round(dist_resistance, 4) if dist_resistance is not None else None,
+    }
+
+
 def _trend_strength(candles: list[dict[str, Any]], period: int = 14) -> float | None:
     """
     Сила тренда за последние period баров (упрощённый аналог ADX по направлению).
@@ -621,6 +655,96 @@ def _apply_higher_tf_context(
     return score
 
 
+def _rough_alternative_scores(primary_phase: str, details: dict[str, Any]) -> dict[str, float]:
+    """
+    Оценка «альтернативных» фаз по тем же метрикам (для второго кандидата и разрыва score).
+    Возвращает словарь phase -> rough_score (0..1) для всех фаз кроме primary_phase.
+    """
+    pos = details.get("position_in_range")
+    pos_val = pos if pos is not None else 0.5
+    structure = details.get("structure") or "range"
+    ret_5 = details.get("return_5")
+    ret_20 = details.get("return_20")
+    r5 = ret_5 if ret_5 is not None else 0.0
+    r20 = ret_20 if ret_20 is not None else 0.0
+    rsi = details.get("rsi")
+    rsi_val = rsi if rsi is not None else 50.0
+    vol_ratio = details.get("volume_ratio")
+    vol = vol_ratio if vol_ratio is not None else 1.0
+
+    out: dict[str, float] = {}
+    for phase in PHASES:
+        if phase == primary_phase:
+            continue
+        sc = 0.3
+        if phase == "capitulation":
+            if r5 <= -0.03 and vol >= 1.2:
+                sc = _clip_score(min(1.0, abs(r5) * 8 + (vol - 1) * 0.2))
+            if rsi_val is not None and rsi_val < 35:
+                sc = _clip_score(sc + 0.1)
+        elif phase == "recovery":
+            if r5 is not None and r20 is not None and r5 > 0.01 and r20 < -0.01:
+                sc = _clip_score(0.5 + min(0.3, (r5 - 0.01) * 10 + abs(r20) * 2))
+        elif phase == "markup":
+            if structure == "up":
+                sc = _clip_score(0.5 + (r20 if r20 is not None else 0) * 5)
+            if rsi_val is not None and rsi_val > 60:
+                sc = _clip_score(sc + 0.05)
+        elif phase == "markdown":
+            if structure == "down":
+                sc = _clip_score(0.5 + abs(r20) * 5 if r20 is not None and r20 < 0 else 0.5)
+            if rsi_val is not None and rsi_val < 40:
+                sc = _clip_score(sc + 0.05)
+        elif phase == "accumulation":
+            if structure == "range" and pos is not None:
+                sc = _clip_score(0.4 + (1.0 - pos_val) * 0.4)
+        elif phase == "distribution":
+            if structure == "range" and pos is not None:
+                sc = _clip_score(0.4 + pos_val * 0.4)
+        out[phase] = sc
+    return out
+
+
+def _build_phase_result(
+    phase: str,
+    score: float,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    """Дополняет результат фазы: второй кандидат, разрыв score, phase_unclear."""
+    phase_score_min = getattr(config, "PHASE_SCORE_MIN", 0.6)
+    unclear_threshold = getattr(config, "PHASE_UNCLEAR_THRESHOLD", 0.5)
+    min_gap = getattr(config, "PHASE_MIN_GAP", 0.1)
+
+    base = {
+        "phase": phase,
+        "phase_ru": PHASE_NAMES_RU.get(phase, phase),
+        "score": score,
+        "details": details,
+    }
+    alt_scores = _rough_alternative_scores(phase, details)
+    if not alt_scores:
+        base["secondary_phase"] = None
+        base["secondary_phase_ru"] = None
+        base["secondary_score"] = 0.0
+        base["score_gap"] = score
+        base["phase_unclear"] = score < unclear_threshold or score < phase_score_min
+        return base
+    secondary_phase = max(alt_scores, key=alt_scores.get)
+    secondary_score = alt_scores[secondary_phase]
+    score_gap = round(max(0.0, score - secondary_score), 4)
+    phase_unclear = (
+        score < unclear_threshold
+        or score < phase_score_min
+        or score_gap < min_gap
+    )
+    base["secondary_phase"] = secondary_phase
+    base["secondary_phase_ru"] = PHASE_NAMES_RU.get(secondary_phase, secondary_phase)
+    base["secondary_score"] = round(secondary_score, 4)
+    base["score_gap"] = score_gap
+    base["phase_unclear"] = phase_unclear
+    return base
+
+
 def detect_phase(
     candles: list[dict[str, Any]],
     lookback: int = 100,
@@ -658,12 +782,7 @@ def detect_phase(
         range_position_high = range_position_high if range_position_high is not None else 0.65
 
     if not candles or len(candles) < 30:
-        return {
-            "phase": "accumulation",
-            "phase_ru": PHASE_NAMES_RU["accumulation"],
-            "score": 0.0,
-            "details": {"reason": "мало данных"},
-        }
+        return _build_phase_result("accumulation", 0.0, {"reason": "мало данных"})
 
     # При наличии 200+ свечей используем окно 200 для EMA200 и более полной структуры
     lookback_eff = lookback
@@ -760,7 +879,7 @@ def detect_phase(
         if spring_vol:
             sc = _clip_score(sc + 0.03)
         sc = _apply_higher_tf_context("capitulation", sc, higher_tf_phase, higher_tf_trend)
-        return {"phase": "capitulation", "phase_ru": PHASE_NAMES_RU["capitulation"], "score": sc, "details": details}
+        return _build_phase_result("capitulation", sc, details)
 
     if r5 is not None and r20 is not None and r5 > 0.01 and r20 < -0.02:
         strength = min(1.0, (r5 - 0.01) / 0.02) * 0.5 + min(1.0, abs(r20) / 0.05) * 0.3
@@ -774,7 +893,7 @@ def detect_phase(
         if obv_s > 0.05:
             sc = _clip_score(sc + 0.02)
         sc = _apply_higher_tf_context("recovery", sc, higher_tf_phase, higher_tf_trend)
-        return {"phase": "recovery", "phase_ru": PHASE_NAMES_RU["recovery"], "score": sc, "details": details}
+        return _build_phase_result("recovery", sc, details)
 
     if structure == "up" and (r20 is None or r20 >= -0.01):
         strength = (r20 + 0.01) / 0.04 if r20 is not None else 0.5
@@ -800,7 +919,7 @@ def detect_phase(
             if vwap_dist > 0:
                 sc = _clip_score(sc + 0.02)
         sc = _apply_higher_tf_context("markup", sc, higher_tf_phase, higher_tf_trend)
-        return {"phase": "markup", "phase_ru": PHASE_NAMES_RU["markup"], "score": sc, "details": details}
+        return _build_phase_result("markup", sc, details)
     if structure == "down" and (r20 is None or r20 <= 0.01):
         strength = (-r20 + 0.01) / 0.04 if r20 is not None else 0.5
         sc = _clip_score(0.65 + 0.2 * min(1.0, max(0.0, strength)))
@@ -827,7 +946,7 @@ def detect_phase(
             if vwap_dist < 0:
                 sc = _clip_score(sc + 0.02)
         sc = _apply_higher_tf_context("markdown", sc, higher_tf_phase, higher_tf_trend)
-        return {"phase": "markdown", "phase_ru": PHASE_NAMES_RU["markdown"], "score": sc, "details": details}
+        return _build_phase_result("markdown", sc, details)
 
     if structure == "range":
         if position is not None and pos <= range_position_low:
@@ -853,7 +972,7 @@ def detect_phase(
             if bb_w < 0.04:
                 sc = _clip_score(sc + 0.02)
             sc = _apply_higher_tf_context("accumulation", sc, higher_tf_phase, higher_tf_trend)
-            return {"phase": "accumulation", "phase_ru": PHASE_NAMES_RU["accumulation"], "score": sc, "details": details}
+            return _build_phase_result("accumulation", sc, details)
         if position is not None and pos >= range_position_high:
             strength = (pos - range_position_high) / max(0.01, 1.0 - range_position_high)
             sc = _clip_score(0.5 + 0.25 * min(1.0, strength))
@@ -880,14 +999,14 @@ def detect_phase(
             if bb_w < 0.04:
                 sc = _clip_score(sc + 0.02)
             sc = _apply_higher_tf_context("distribution", sc, higher_tf_phase, higher_tf_trend)
-            return {"phase": "distribution", "phase_ru": PHASE_NAMES_RU["distribution"], "score": sc, "details": details}
+            return _build_phase_result("distribution", sc, details)
         if (r20 or 0) > 0.01:
             strength = min(1.0, ((r20 or 0) - 0.01) / 0.02)
             sc = _clip_score(0.4 + 0.2 * strength)
             if rsi_val > 70:
                 sc = _clip_score(sc - 0.08)
             sc = _apply_higher_tf_context("markup", sc, higher_tf_phase, higher_tf_trend)
-            return {"phase": "markup", "phase_ru": PHASE_NAMES_RU["markup"], "score": sc, "details": details}
+            return _build_phase_result("markup", sc, details)
         if (r20 or 0) < -0.01:
             strength = min(1.0, (abs(r20 or 0) - 0.01) / 0.02)
             sc = _clip_score(0.4 + 0.2 * strength)
@@ -896,9 +1015,9 @@ def detect_phase(
             if rsi_bear_div:
                 sc = _clip_score(sc + 0.03)
             sc = _apply_higher_tf_context("markdown", sc, higher_tf_phase, higher_tf_trend)
-            return {"phase": "markdown", "phase_ru": PHASE_NAMES_RU["markdown"], "score": sc, "details": details}
+            return _build_phase_result("markdown", sc, details)
         sc = _apply_higher_tf_context("accumulation", 0.4, higher_tf_phase, higher_tf_trend)
-        return {"phase": "accumulation", "phase_ru": PHASE_NAMES_RU["accumulation"], "score": sc, "details": details}
+        return _build_phase_result("accumulation", sc, details)
 
     if (r20 or 0) > 0.02:
         strength = min(1.0, ((r20 or 0) - 0.02) / 0.05)
@@ -906,7 +1025,7 @@ def detect_phase(
         if rsi_val > 70:
             sc = _clip_score(sc - 0.1)
         sc = _apply_higher_tf_context("markup", sc, higher_tf_phase, higher_tf_trend)
-        return {"phase": "markup", "phase_ru": PHASE_NAMES_RU["markup"], "score": sc, "details": details}
+        return _build_phase_result("markup", sc, details)
     if (r20 or 0) < -0.02:
         strength = min(1.0, (abs(r20 or 0) - 0.02) / 0.05)
         sc = _clip_score(0.5 + 0.3 * strength)
@@ -915,9 +1034,9 @@ def detect_phase(
         if rsi_bear_div:
             sc = _clip_score(sc + 0.03)
         sc = _apply_higher_tf_context("markdown", sc, higher_tf_phase, higher_tf_trend)
-        return {"phase": "markdown", "phase_ru": PHASE_NAMES_RU["markdown"], "score": sc, "details": details}
+        return _build_phase_result("markdown", sc, details)
     sc = _apply_higher_tf_context("accumulation", 0.3, higher_tf_phase, higher_tf_trend)
-    return {"phase": "accumulation", "phase_ru": PHASE_NAMES_RU["accumulation"], "score": sc, "details": details}
+    return _build_phase_result("accumulation", sc, details)
 
 
 def get_phase_name_ru(phase: str) -> str:

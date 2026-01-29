@@ -46,7 +46,9 @@ python accumulate_db.py
 python main.py
 ```
 
-**Управление через Telegram:**
+При заданном в `.env` токене `TELEGRAM_BOT_TOKEN` Telegram-бот запускается из `main.py` в отдельном потоке (общее соединение с БД). Для работы только сигнального бота оставь `TELEGRAM_BOT_TOKEN` пустым.
+
+**Управление через Telegram** (отдельный процесс, если не используешь запуск из main):
 
 ```bash
 python telegram_bot.py
@@ -113,11 +115,11 @@ git checkout v1.0.0
 best_bot_in_the_world/
 ├── src/
 │   ├── core/               # config, database, exchange, logging_config
-│   ├── analysis/           # market_phases (6 фаз, Вайкофф + индикаторы), multi_tf
+│   ├── analysis/           # market_phases (6 фаз, Вайкофф + индикаторы), market_trend (тренд, режим рынка), multi_tf
 │   │                        # phase_wyckoff, phase_indicators, phase_structure — для сравнения
 │   ├── app/                # main, bot_loop, db_sync, telegram_bot
 │   ├── scripts/            # accumulate_db, backtest_phases, compare_phase_methods, full_backfill, test_run_once
-│   └── utils/              # validators, helpers
+│   └── utils/              # validators, helpers, candle_quality
 ├── strategies/             # Заготовка под стратегии
 ├── tests/                  # unit/, integration/, backtest/
 ├── data/                   # SQLite (data/klines.db), в .gitignore
@@ -126,6 +128,7 @@ best_bot_in_the_world/
 ├── telegram_bot.py        # python telegram_bot.py
 ├── accumulate_db.py        # python accumulate_db.py
 ├── backtest_phases.py      # Бэктест фаз: python backtest_phases.py [--tf 60] [--tune]
+├── backtest_trend.py       # Бэктест тренда: python backtest_trend.py [--tf 60]
 ├── compare_phase_methods.py # Сравнение методов фаз: python compare_phase_methods.py
 ├── full_backfill.py        # python full_backfill.py [--clear] [--extend]
 ├── test_run_once.py        # python test_run_once.py
@@ -138,7 +141,7 @@ best_bot_in_the_world/
 
 ## Дальнейшие шаги
 
-- Фазы рынка уже используют индикаторы (EMA, ADX, BB, OBV, VWAP, RSI) и Вайкофф (структура, объём, Spring/Upthrust, climax). Дальше — тонкая настройка порогов и стратегий.
+- Фазы, тренд, режим рынка, фильтры входа, единый score входа (фаза + тренд + ТФ) и проверка качества свечей уже реализованы. Дальше — тонкая настройка порогов и стратегий.
 - Реализовать исполнение ордеров через Bybit API при появлении сигнала.
 - Ввести риск-менеджмент: размер позиции, стоп-лосс, тейк-профит.
 - Поддержка нескольких пар и отдельная конфигурация стратегии под каждую.
