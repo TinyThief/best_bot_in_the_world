@@ -111,34 +111,34 @@ git checkout v1.0.0
 
 ```
 best_bot_in_the_world/
-├── src/                    # Ядро бота
-│   ├── config.py           # Настройки из .env, PROJECT_ROOT
-│   ├── exchange.py         # Клиент Bybit: свечи, бэкфилл
-│   ├── database.py         # SQLite, таблица klines
-│   ├── market_phases.py    # 6 фаз рынка
-│   ├── multi_tf.py         # МультиТФ анализ, тренды, фазы, сигнал
-│   ├── main.py              # Цикл опроса (логика)
-│   ├── accumulate_db.py   # Накопление БД (логика)
-│   ├── full_backfill.py   # Полный бэкфилл за весь период
-│   ├── test_run_once.py   # Один прогон анализа (тест)
-│   └── telegram_bot.py    # Управление через Telegram (команды /signal, /db и др.)
-├── data/                   # SQLite-база (data/klines.db), в .gitignore
+├── src/
+│   ├── core/               # config, database, exchange, logging_config
+│   ├── analysis/           # market_phases (6 фаз, Вайкофф + индикаторы), multi_tf
+│   │                        # phase_wyckoff, phase_indicators, phase_structure — для сравнения
+│   ├── app/                # main, bot_loop, db_sync, telegram_bot
+│   ├── scripts/            # accumulate_db, backtest_phases, compare_phase_methods, full_backfill, test_run_once
+│   └── utils/              # validators, helpers
+├── strategies/             # Заготовка под стратегии
+├── tests/                  # unit/, integration/, backtest/
+├── data/                   # SQLite (data/klines.db), в .gitignore
+├── logs/                   # bot.log, signals.log, в .gitignore
 ├── main.py                 # Точка входа: python main.py
-├── accumulate_db.py        # Точка входа: python accumulate_db.py
-├── full_backfill.py        # Точка входа: python full_backfill.py [--clear]
-├── telegram_bot.py         # Точка входа: python telegram_bot.py (Telegram)
-├── test_run_once.py        # Тест: python test_run_once.py
-├── release.py              # Версии и push в GitHub
-├── requirements.txt
-├── .env.example
-├── README.md
-├── AGENT_CONTEXT.md        # Контекст для AI
-└── ДЛЯ_КОМАНДЫ.md         # Онбординг для команды
+├── telegram_bot.py        # python telegram_bot.py
+├── accumulate_db.py        # python accumulate_db.py
+├── backtest_phases.py      # Бэктест фаз: python backtest_phases.py [--tf 60] [--tune]
+├── compare_phase_methods.py # Сравнение методов фаз: python compare_phase_methods.py
+├── full_backfill.py        # python full_backfill.py [--clear] [--extend]
+├── test_run_once.py        # python test_run_once.py
+├── check_all.py            # Проверка окружения: python check_all.py [--quick] [-v]
+├── release.py              # Версии и push: python release.py 1.0.0
+├── requirements.txt, .env.example
+├── README.md, AGENT_CONTEXT.md, ДЛЯ_КОМАНДЫ.md, CHANGELOG.md
+└── .cursorrules, .cursor/rules/
 ```
 
 ## Дальнейшие шаги
 
-- Добавить индикаторы (MA, RSI, уровни) на выбранные ТФ.
+- Фазы рынка уже используют индикаторы (EMA, ADX, BB, OBV, VWAP, RSI) и Вайкофф (структура, объём, Spring/Upthrust, climax). Дальше — тонкая настройка порогов и стратегий.
 - Реализовать исполнение ордеров через Bybit API при появлении сигнала.
 - Ввести риск-менеджмент: размер позиции, стоп-лосс, тейк-профит.
 - Поддержка нескольких пар и отдельная конфигурация стратегии под каждую.

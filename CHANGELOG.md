@@ -4,6 +4,25 @@
 
 ---
 
+## [2.2.0] — 2026-01-28
+
+Промежуточная версия: метрики фаз (EMA, ADX, BB, OBV, VWAP), усиление Вайкоффа, три модуля фаз для сравнения.
+
+### Добавлено
+
+- **Метрики фаз (market_phases):** EMA 20/50/200 (стек), ADX(14), ширина Bollinger Bands, OBV slope, VWAP (rolling). Учёт в решении о фазе и в details.
+- **Усиление Вайкоффа:** при 200+ свечах окно 200 баров (для EMA200); Spring/Upthrust с подтверждением объёмом; Selling/Buying climax; счёт подтверждений для markup/markdown (2+ или 3+ из четырёх индикаторов дают бонус к score).
+- **Подбор порогов (--tune):** для профиля long обновлены PHASE_PROFILES (vol_spike 1.5, drop_threshold -0.07, range_position_high 0.70).
+- **Три модуля фаз для сравнения:** phase_wyckoff (только Вайкофф), phase_indicators (только индикаторы), phase_structure (только price action / BOS-CHOCH). Единый интерфейс detect_phase().
+- **Скрипт сравнения методов:** compare_phase_methods.py — один бэктест по БД для трёх методов, вывод точности по направлению. Лаунчер в корне.
+
+### Изменено
+
+- **market_phases.py** — детектор фаз расширен (см. выше); details дополнены полями ema_trend, adx, bb_width, obv_slope, vwap_distance, spring_volume_confirmed, upthrust_volume_confirmed, selling_climax, buying_climax.
+- **ДЛЯ_КОМАНДЫ.md**, **README.md**, **AGENT_CONTEXT.md** — актуализированы структура, описание фаз, скрипты и лаунчеры.
+
+---
+
 ## [2.1.0] — 2026-01-28
 
 Промежуточная версия: анализ из БД, ретраи API, уверенность сигнала, расширенный check_all.
@@ -78,4 +97,5 @@
 
 [2.0.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v1.0.0...v2.0.0
 [2.1.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.0.0...v2.1.0
+[2.2.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.1.0...v2.2.0
 [1.0.0]: https://github.com/TinyThief/best_bot_in_the_world/releases/tag/v1.0.0

@@ -53,10 +53,10 @@ PHASE_PROFILES = {
         "range_position_high": 0.70,
     },
     "long": {
-        "vol_spike": 1.6,
-        "drop_threshold": -0.06,
+        "vol_spike": 1.5,
+        "drop_threshold": -0.07,
         "range_position_low": 0.35,
-        "range_position_high": 0.65,
+        "range_position_high": 0.70,
     },
 }
 
@@ -86,6 +86,33 @@ def _ema(series: list[float], length: int) -> float | None:
     return ema_val
 
 
+def _ema_stack(
+    candles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    EMA 20 / 50 / 200 по закрытиям и признак тренда по стеку.
+
+    Возвращает: ema20, ema50, ema200, ema_trend.
+    ema_trend: 'bullish' (цена > EMA20 > EMA50 > EMA200), 'bearish' (обратно), 'mixed'.
+    """
+    if not candles or len(candles) < 200:
+        return {"ema20": None, "ema50": None, "ema200": None, "ema_trend": None}
+    closes = [c["close"] for c in candles]
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+    ema200 = _ema(closes, 200)
+    if ema20 is None or ema50 is None or ema200 is None:
+        return {"ema20": ema20, "ema50": ema50, "ema200": ema200, "ema_trend": None}
+    last = closes[-1]
+    if last > ema20 > ema50 > ema200:
+        trend = "bullish"
+    elif last < ema20 < ema50 < ema200:
+        trend = "bearish"
+    else:
+        trend = "mixed"
+    return {"ema20": ema20, "ema50": ema50, "ema200": ema200, "ema_trend": trend}
+
+
 def _atr(candles: list[dict[str, Any]], length: int = 14) -> float | None:
     """ATR за последние length свечей (упрощённо: true range = high - low)."""
     if not candles or len(candles) < length:
@@ -93,6 +120,69 @@ def _atr(candles: list[dict[str, Any]], length: int = 14) -> float | None:
     recent = candles[-length:]
     trs = [c["high"] - c["low"] for c in recent]
     return sum(trs) / len(trs)
+
+
+def _adx(
+    candles: list[dict[str, Any]], period: int = 14
+) -> tuple[float | None, float | None, float | None]:
+    """
+    ADX(period), +DI и -DI по Уайлдеру.
+
+    Возвращает (adx, plus_di, minus_di). Нужно не менее 2*period+1 свечей.
+    """
+    if not candles or len(candles) < 2 * period + 1:
+        return None, None, None
+    # TR, +DM, -DM по каждой свече (начиная со 2-й)
+    tr_list: list[float] = []
+    plus_dm_list: list[float] = []
+    minus_dm_list: list[float] = []
+    for i in range(1, len(candles)):
+        h, l_ = candles[i]["high"], candles[i]["low"]
+        prev_h, prev_l = candles[i - 1]["high"], candles[i - 1]["low"]
+        prev_close = candles[i - 1]["close"]
+        tr = max(h - l_, abs(h - prev_close), abs(l_ - prev_close))
+        up_move = h - prev_h
+        down_move = prev_l - l_
+        plus_dm = up_move if up_move > down_move and up_move > 0 else 0.0
+        minus_dm = down_move if down_move > up_move and down_move > 0 else 0.0
+        tr_list.append(tr)
+        plus_dm_list.append(plus_dm)
+        minus_dm_list.append(minus_dm)
+    # Сглаживание Уайлдера с начала ряда
+    def wilder_smooth(series: list[float]) -> list[float]:
+        if len(series) < period:
+            return []
+        sm = sum(series[:period]) / period
+        out = [sm]
+        for i in range(period, len(series)):
+            sm = (sm * (period - 1) + series[i]) / period
+            out.append(sm)
+        return out
+
+    tr_smooth = wilder_smooth(tr_list)
+    plus_dm_smooth = wilder_smooth(plus_dm_list)
+    minus_dm_smooth = wilder_smooth(minus_dm_list)
+    if len(tr_smooth) < period + 1:
+        return None, None, None
+    # +DI, -DI, затем DX
+    plus_di_list = [
+        100.0 * plus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0
+        for i in range(len(tr_smooth))
+    ]
+    minus_di_list = [
+        100.0 * minus_dm_smooth[i] / tr_smooth[i] if tr_smooth[i] > 0 else 0.0
+        for i in range(len(tr_smooth))
+    ]
+    dx_list = [
+        100.0 * abs(plus_di_list[i] - minus_di_list[i]) / (plus_di_list[i] + minus_di_list[i])
+        if (plus_di_list[i] + minus_di_list[i]) > 0
+        else 0.0
+        for i in range(len(plus_di_list))
+    ]
+    adx_series = wilder_smooth(dx_list)
+    if not adx_series:
+        return None, None, None
+    return adx_series[-1], plus_di_list[-1], minus_di_list[-1]
 
 
 def _price_position_in_range(candles: list[dict[str, Any]], lookback: int) -> float | None:
@@ -109,6 +199,30 @@ def _price_position_in_range(candles: list[dict[str, Any]], lookback: int) -> fl
     return (last_close - r_min) / (r_max - r_min)
 
 
+def _bb_width(
+    candles: list[dict[str, Any]], period: int = 20, mult: float = 2.0
+) -> float | None:
+    """
+    Ширина полос Боллинджера: (upper - lower) / middle.
+
+    middle = SMA(period), upper/lower = middle ± mult*std(close).
+    Низкая ширина — сжатие (squeeze), высокая — расширение. Нужно не менее period свечей.
+    """
+    if not candles or len(candles) < period:
+        return None
+    closes = [c["close"] for c in candles[-period:]]
+    middle = sum(closes) / period
+    variance = sum((x - middle) ** 2 for x in closes) / period
+    if variance <= 0:
+        return 0.0
+    std = variance ** 0.5
+    upper = middle + mult * std
+    lower = middle - mult * std
+    if middle <= 0:
+        return None
+    return (upper - lower) / middle
+
+
 def _volume_ratio(candles: list[dict[str, Any]], short: int = 3, long: int = 20) -> float | None:
     """Отношение среднего объёма за short последних свечей к среднему за long."""
     if not candles or len(candles) < long:
@@ -119,6 +233,72 @@ def _volume_ratio(candles: list[dict[str, Any]], short: int = 3, long: int = 20)
     if avg_long <= 0:
         return None
     return avg_short / avg_long
+
+
+def _obv(candles: list[dict[str, Any]]) -> float | None:
+    """On-Balance Volume: накопленный объём с учётом направления (close > prev → +vol, иначе −vol)."""
+    if not candles or len(candles) < 2:
+        return None
+    obv = 0.0
+    for i in range(1, len(candles)):
+        if candles[i]["close"] > candles[i - 1]["close"]:
+            obv += candles[i]["volume"]
+        elif candles[i]["close"] < candles[i - 1]["close"]:
+            obv -= candles[i]["volume"]
+    return obv
+
+
+def _obv_slope(
+    candles: list[dict[str, Any]], lookback: int = 14
+) -> float | None:
+    """
+    Наклон OBV за lookback свечей: (OBV_end - OBV_start) / |OBV_start| или нормализованный.
+
+    > 0 — давление покупателей, < 0 — продавцов. None при недостатке данных.
+    """
+    if not candles or len(candles) < lookback + 1:
+        return None
+    # OBV на момент (end - lookback) и на конец
+    obv_start = _obv(candles[: -lookback])
+    obv_end = _obv(candles)
+    if obv_start is None or obv_end is None:
+        return None
+    diff = obv_end - obv_start
+    if obv_start == 0:
+        return 1.0 if diff > 0 else (-1.0 if diff < 0 else 0.0)
+    return diff / abs(obv_start)
+
+
+def _vwap_rolling(
+    candles: list[dict[str, Any]], lookback: int | None = None
+) -> tuple[float | None, float | None]:
+    """
+    Rolling VWAP за последние lookback свечей: sum(typical_price * volume) / sum(volume).
+
+    typical_price = (high + low + close) / 3.
+    Возвращает (vwap, distance): distance = (close - vwap) / vwap — доля выше/ниже VWAP.
+    Для 24/7 без сессий — единственный вариант. lookback=None — все свечи.
+    """
+    if not candles:
+        return None, None
+    use = candles[-lookback:] if lookback else candles
+    if not use:
+        return None, None
+    cum_tp_vol = 0.0
+    cum_vol = 0.0
+    for c in use:
+        tp = (c["high"] + c["low"] + c["close"]) / 3.0
+        vol = c["volume"]
+        cum_tp_vol += tp * vol
+        cum_vol += vol
+    if cum_vol <= 0:
+        return None, None
+    vwap = cum_tp_vol / cum_vol
+    last_close = use[-1]["close"]
+    if vwap <= 0:
+        return vwap, None
+    distance = (last_close - vwap) / vwap
+    return vwap, distance
 
 
 def _volume_at_range_bounds(
@@ -228,6 +408,54 @@ def _spring_upthrust(
     return spring, upthrust
 
 
+def _spring_upthrust_volume_confirmed(
+    candles: list[dict[str, Any]], lookback: int = 30, tail: int = 10, break_pct: float = 0.002, vol_mult: float = 1.2
+) -> tuple[bool, bool, bool, bool]:
+    """
+    Spring/upthrust плюс подтверждение объёмом: в окне tail был бар с объёмом > vol_mult * ср. объём.
+
+    Возвращает (spring, upthrust, spring_vol_ok, upthrust_vol_ok).
+    spring_vol_ok: spring и в tail есть бар с объёмом выше среднего (подтверждение капитуляции/накопления).
+    """
+    spring, upthrust = _spring_upthrust(candles, lookback=lookback, tail=tail, break_pct=break_pct)
+    if not candles or len(candles) < lookback or lookback <= tail:
+        return spring, upthrust, False, False
+    last = candles[-tail:]
+    avg_vol = sum(c["volume"] for c in last) / len(last)
+    if avg_vol <= 0:
+        return spring, upthrust, False, False
+    # Бар с пробоем низа (low минимальный в tail) или верха (high максимальный в tail) с повышенным объёмом
+    max_vol = max(c["volume"] for c in last)
+    vol_ok = max_vol >= vol_mult * avg_vol
+    return spring, upthrust, spring and vol_ok, upthrust and vol_ok
+
+
+def _climax(
+    candles: list[dict[str, Any]],
+    ret_bars: int = 5,
+    vol_short: int = 3,
+    vol_long: int = 20,
+    ret_threshold: float = 0.03,
+    vol_spike: float = 1.5,
+) -> tuple[bool, bool]:
+    """
+    Selling climax (капитуляция продавцов) и Buying climax (истощение покупателей) по Вайкоффу.
+
+    Selling: резкое падение (ret_5 < -ret_threshold) + всплеск объёма (vol_ratio >= vol_spike).
+    Buying: резкий рост (ret_5 > ret_threshold) + всплеск объёма.
+    Возвращает (selling_climax, buying_climax).
+    """
+    if not candles or len(candles) < max(ret_bars + 1, vol_long):
+        return False, False
+    ret = _recent_return(candles, ret_bars)
+    vol_ratio = _volume_ratio(candles, short=vol_short, long=vol_long)
+    if ret is None or vol_ratio is None:
+        return False, False
+    selling = ret <= -ret_threshold and vol_ratio >= vol_spike
+    buying = ret >= ret_threshold and vol_ratio >= vol_spike
+    return selling, buying
+
+
 def _zone_freshness(
     candles: list[dict[str, Any]], lookback: int = 20, band: float = 0.2
 ) -> tuple[bool, bool]:
@@ -250,8 +478,13 @@ def _zone_freshness(
     high_bound = r_max - band * (r_max - r_min)
     last_3 = candles[-3:]
     prev_3 = candles[-6:-3]
-    in_low = lambda seq: sum(1 for c in seq if c["close"] <= low_bound)
-    in_high = lambda seq: sum(1 for c in seq if c["close"] >= high_bound)
+
+    def in_low(seq: list[dict[str, Any]]) -> int:
+        return sum(1 for c in seq if c["close"] <= low_bound)
+
+    def in_high(seq: list[dict[str, Any]]) -> int:
+        return sum(1 for c in seq if c["close"] >= high_bound)
+
     fresh_low = in_low(last_3) >= 2 and in_low(prev_3) <= 1
     fresh_high = in_high(last_3) >= 2 and in_high(prev_3) <= 1
     return fresh_low, fresh_high
@@ -432,7 +665,11 @@ def detect_phase(
             "details": {"reason": "мало данных"},
         }
 
-    c = candles[-lookback:] if len(candles) >= lookback else candles
+    # При наличии 200+ свечей используем окно 200 для EMA200 и более полной структуры
+    lookback_eff = lookback
+    if len(candles) >= 200:
+        lookback_eff = min(max(lookback, 200), len(candles))
+    c = candles[-lookback_eff:] if len(candles) >= lookback_eff else candles
     structure = _structure(c, pivots=5)
     position = _price_position_in_range(c, lookback=min(50, len(c)))
     vol_ratio = _volume_ratio(c, short=3, long=20)
@@ -447,8 +684,20 @@ def detect_phase(
     buying_pressure, selling_pressure = _volume_pressure_at_bounds(c, lookback=lb, band=0.15)
     rsi_bull_div, rsi_bear_div = _rsi_divergence(c, period=14, window=min(20, len(c) // 2))
     spring, upthrust = _spring_upthrust(c, lookback=min(30, len(c)), tail=min(10, len(c) // 3))
+    spring_vol, upthrust_vol = False, False
+    if len(c) >= 20:
+        _, _, spring_vol, upthrust_vol = _spring_upthrust_volume_confirmed(
+            c, lookback=min(30, len(c)), tail=min(10, len(c) // 3)
+        )
+    selling_climax, buying_climax = _climax(c, ret_bars=5, vol_spike=1.5)
     trend_strength = _trend_strength(c, 14)
     fresh_low, fresh_high = _zone_freshness(c, lookback=min(20, len(c)), band=0.2)
+    # Новые метрики: EMA-стек, ADX, BB width, OBV, VWAP
+    ema_stack = _ema_stack(c)
+    adx_val, plus_di, minus_di = _adx(c, 14)
+    bb_width = _bb_width(c, 20, 2.0)
+    obv_slope = _obv_slope(c, 14) if len(c) >= 15 else None
+    vwap_val, vwap_distance = _vwap_rolling(c, min(50, len(c)))
 
     details = {
         "structure": structure,
@@ -462,6 +711,10 @@ def detect_phase(
         "rsi_bearish_divergence": rsi_bear_div,
         "spring": spring,
         "upthrust": upthrust,
+        "spring_volume_confirmed": spring_vol,
+        "upthrust_volume_confirmed": upthrust_vol,
+        "selling_climax": selling_climax,
+        "buying_climax": buying_climax,
         "trend_strength": round(trend_strength, 3) if trend_strength is not None else None,
         "fresh_low": fresh_low,
         "fresh_high": fresh_high,
@@ -469,6 +722,17 @@ def detect_phase(
         "return_5": round(ret_5, 4) if ret_5 is not None else None,
         "return_20": round(ret_20, 4) if ret_20 is not None else None,
         "rsi": round(rsi, 1) if rsi is not None else None,
+        "ema20": round(ema_stack["ema20"], 4) if ema_stack.get("ema20") is not None else None,
+        "ema50": round(ema_stack["ema50"], 4) if ema_stack.get("ema50") is not None else None,
+        "ema200": round(ema_stack["ema200"], 4) if ema_stack.get("ema200") is not None else None,
+        "ema_trend": ema_stack.get("ema_trend"),
+        "adx": round(adx_val, 2) if adx_val is not None else None,
+        "plus_di": round(plus_di, 2) if plus_di is not None else None,
+        "minus_di": round(minus_di, 2) if minus_di is not None else None,
+        "bb_width": round(bb_width, 4) if bb_width is not None else None,
+        "obv_slope": round(obv_slope, 4) if obv_slope is not None else None,
+        "vwap": round(vwap_val, 4) if vwap_val is not None else None,
+        "vwap_distance": round(vwap_distance, 4) if vwap_distance is not None else None,
     }
 
     pos = position if position is not None else 0.5
@@ -481,11 +745,20 @@ def detect_phase(
     r5 = ret_5 if ret_5 is not None else 0.0
     r20 = ret_20 if ret_20 is not None else 0.0
     rsi_val = rsi if rsi is not None else 50.0
+    ema_trend = ema_stack.get("ema_trend")
+    adx = adx_val if adx_val is not None else 0.0
+    bb_w = bb_width if bb_width is not None else 0.05
+    obv_s = obv_slope if obv_slope is not None else 0.0
+    vwap_dist = vwap_distance if vwap_distance is not None else 0.0
 
     if r5 <= drop_threshold and vol >= vol_spike:
         sc = min(1.0, abs(r5) * 5 + (vol - 1) * 0.2)
         if rsi_val < 30:
             sc = _clip_score(sc + 0.05)
+        if selling_climax:
+            sc = _clip_score(sc + 0.06)
+        if spring_vol:
+            sc = _clip_score(sc + 0.03)
         sc = _apply_higher_tf_context("capitulation", sc, higher_tf_phase, higher_tf_trend)
         return {"phase": "capitulation", "phase_ru": PHASE_NAMES_RU["capitulation"], "score": sc, "details": details}
 
@@ -496,6 +769,10 @@ def detect_phase(
             sc = _clip_score(sc + 0.08)
         if rsi_bull_div:
             sc = _clip_score(sc + 0.05)
+        if ema_trend == "bullish" or vwap_dist > 0:
+            sc = _clip_score(sc + 0.02)
+        if obv_s > 0.05:
+            sc = _clip_score(sc + 0.02)
         sc = _apply_higher_tf_context("recovery", sc, higher_tf_phase, higher_tf_trend)
         return {"phase": "recovery", "phase_ru": PHASE_NAMES_RU["recovery"], "score": sc, "details": details}
 
@@ -508,6 +785,20 @@ def detect_phase(
             sc = _clip_score(sc + 0.03)
         elif trend_str < 0.2:
             sc = _clip_score(sc - 0.03)
+        confirm_bull = sum([ema_trend == "bullish", adx > 25, vwap_dist > 0, obv_s > 0.05])
+        if confirm_bull >= 3:
+            sc = _clip_score(sc + 0.08)
+        elif confirm_bull >= 2:
+            sc = _clip_score(sc + 0.05)
+        else:
+            if ema_trend == "bullish":
+                sc = _clip_score(sc + 0.03)
+            if adx > 25:
+                sc = _clip_score(sc + 0.02)
+            if obv_s > 0.05:
+                sc = _clip_score(sc + 0.02)
+            if vwap_dist > 0:
+                sc = _clip_score(sc + 0.02)
         sc = _apply_higher_tf_context("markup", sc, higher_tf_phase, higher_tf_trend)
         return {"phase": "markup", "phase_ru": PHASE_NAMES_RU["markup"], "score": sc, "details": details}
     if structure == "down" and (r20 is None or r20 <= 0.01):
@@ -521,6 +812,20 @@ def detect_phase(
             sc = _clip_score(sc + 0.03)
         elif trend_str < 0.2:
             sc = _clip_score(sc - 0.03)
+        confirm_bear = sum([ema_trend == "bearish", adx > 25, vwap_dist < 0, obv_s < -0.05])
+        if confirm_bear >= 3:
+            sc = _clip_score(sc + 0.08)
+        elif confirm_bear >= 2:
+            sc = _clip_score(sc + 0.05)
+        else:
+            if ema_trend == "bearish":
+                sc = _clip_score(sc + 0.03)
+            if adx > 25:
+                sc = _clip_score(sc + 0.02)
+            if obv_s < -0.05:
+                sc = _clip_score(sc + 0.02)
+            if vwap_dist < 0:
+                sc = _clip_score(sc + 0.02)
         sc = _apply_higher_tf_context("markdown", sc, higher_tf_phase, higher_tf_trend)
         return {"phase": "markdown", "phase_ru": PHASE_NAMES_RU["markdown"], "score": sc, "details": details}
 
@@ -537,9 +842,15 @@ def detect_phase(
                 sc = _clip_score(sc + 0.04)
             if spring:
                 sc = _clip_score(sc + 0.05)
+            if spring_vol:
+                sc = _clip_score(sc + 0.03)
             if trend_str < 0.3:
                 sc = _clip_score(sc + 0.03)
             if fresh_low:
+                sc = _clip_score(sc + 0.02)
+            if adx < 20:
+                sc = _clip_score(sc + 0.02)
+            if bb_w < 0.04:
                 sc = _clip_score(sc + 0.02)
             sc = _apply_higher_tf_context("accumulation", sc, higher_tf_phase, higher_tf_trend)
             return {"phase": "accumulation", "phase_ru": PHASE_NAMES_RU["accumulation"], "score": sc, "details": details}
@@ -556,9 +867,17 @@ def detect_phase(
                 sc = _clip_score(sc + 0.04)
             if upthrust:
                 sc = _clip_score(sc + 0.05)
+            if upthrust_vol:
+                sc = _clip_score(sc + 0.03)
+            if buying_climax:
+                sc = _clip_score(sc + 0.05)
             if trend_str < 0.3:
                 sc = _clip_score(sc + 0.03)
             if fresh_high:
+                sc = _clip_score(sc + 0.02)
+            if adx < 20:
+                sc = _clip_score(sc + 0.02)
+            if bb_w < 0.04:
                 sc = _clip_score(sc + 0.02)
             sc = _apply_higher_tf_context("distribution", sc, higher_tf_phase, higher_tf_trend)
             return {"phase": "distribution", "phase_ru": PHASE_NAMES_RU["distribution"], "score": sc, "details": details}
