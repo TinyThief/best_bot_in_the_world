@@ -42,21 +42,32 @@ def _get_price_range(symbol: str, category: str) -> tuple[float, float]:
     return _DEFAULT_PRICE_RANGE
 
 
-# Максимальный допустимый интрадей-диапазон (high-low)/open для любой свечи.
-# Реалистично для BTC: дневной диапазон обычно до 10–20%; 30% отсекает мусор (low/high далеко от тела).
+# Максимальный допустимый диапазон (high-low)/open. Для минутных свечей 30% отсекает мусор.
+# Для D/W/M исторически бывают реальные 30–60% дневные диапазоны — используем 50%.
 _MAX_OHLC_RANGE_RATIO = 0.30
+_MAX_OHLC_RANGE_RATIO_DAILY = 0.50  # D, W, M
+
+
+def _max_range_ratio_for_interval(interval: str | None) -> float:
+    """Порог по диапазону: для дневных и старше — мягче."""
+    if not interval:
+        return _MAX_OHLC_RANGE_RATIO
+    tf = str(interval).strip().upper()
+    return _MAX_OHLC_RANGE_RATIO_DAILY if tf in ("D", "W", "M") else _MAX_OHLC_RANGE_RATIO
 
 
 def _filter_valid_ohlc(
-    candles: list[dict[str, Any]], symbol: str, category: str
+    candles: list[dict[str, Any]], symbol: str, category: str, interval: str | None = None
 ) -> list[dict[str, Any]]:
     """
-    Отфильтровывает свечи с нереалистичными OHLC (например turnover вместо цены, абсурдный диапазон).
-    Логирует отброшенные свечи. Применяется ко всем таймфреймам.
+    Отфильтровывает свечи с нереалистичными OHLC (цена вне диапазона, абсурдный диапазон).
+    Для ТФ D/W/M порог диапазона мягче (50%), чтобы не отбрасывать реальные волатильные дни.
+    В лог — только сводка (каждую отброшенную свечу пишем в DEBUG).
     """
     if not candles:
         return candles
     low_ok, high_ok = _get_price_range(symbol, category)
+    max_ratio = _max_range_ratio_for_interval(interval)
     valid = []
     dropped = 0
     for c in candles:
@@ -70,32 +81,37 @@ def _filter_valid_ohlc(
         mx = max(o, h, l, cl)
         if mn < low_ok or mx > high_ok:
             dropped += 1
-            logger.warning(
-                "Свеча отброшена (цена вне диапазона %s–%s USDT): symbol=%s ts=%s O=%.2f H=%.2f L=%.2f C=%.2f",
+            logger.debug(
+                "Свеча отброшена (цена вне %s–%s): symbol=%s ts=%s O=%.2f H=%.2f L=%.2f C=%.2f",
                 low_ok, high_ok, symbol, c.get("start_time"), o, h, l, cl,
             )
             continue
         if o and o > 0:
             range_ratio = (h - l) / o
-            if range_ratio > _MAX_OHLC_RANGE_RATIO:
+            if range_ratio > max_ratio:
                 dropped += 1
-                logger.warning(
-                    "Свеча отброшена (абсурдный диапазон %.1f%%): symbol=%s ts=%s O=%.2f H=%.2f L=%.2f C=%.2f",
-                    range_ratio * 100, symbol, c.get("start_time"), o, h, l, cl,
+                logger.debug(
+                    "Свеча отброшена (диапазон %.1f%% > %.0f%%): symbol=%s ts=%s O=%.2f H=%.2f L=%.2f C=%.2f",
+                    range_ratio * 100, max_ratio * 100, symbol, c.get("start_time"), o, h, l, cl,
                 )
                 continue
         valid.append(c)
     if dropped:
-        logger.warning("Всего отброшено свечей с неверным масштабом/диапазоном: %s (оставлено %s)", dropped, len(valid))
+        logger.warning(
+            "Отброшено свечей с неверным масштабом/диапазоном: %s (оставлено %s, ТФ=%s)",
+            dropped, len(valid), interval or "—",
+        )
     return valid
 
 
 def _session() -> HTTP:
     """Единая сессия Bybit HTTP (только маркет-данные — ключи не обязательны)."""
+    timeout = getattr(config, "EXCHANGE_REQUEST_TIMEOUT_SEC", 30)
     return HTTP(
         testnet=config.BYBIT_TESTNET,
         api_key=config.BYBIT_API_KEY or None,
         api_secret=config.BYBIT_API_SECRET or None,
+        timeout=timeout,
     )
 
 
@@ -199,7 +215,7 @@ def get_klines(
 
     raw_list = out.get("result", {}).get("list") or []
     parsed = _parse_kline_list(raw_list)
-    return _filter_valid_ohlc(parsed, symbol, category)
+    return _filter_valid_ohlc(parsed, symbol, category, interval)
 
 
 def get_klines_multi_timeframe(
@@ -258,7 +274,7 @@ def fetch_klines_backfill(
         if not raw_list:
             break
         chunk = _parse_kline_list(raw_list)
-        chunk = _filter_valid_ohlc(chunk, symbol, category)
+        chunk = _filter_valid_ohlc(chunk, symbol, category, interval)
         if not chunk:
             break
         current_end = min(c["start_time"] for c in chunk) - 1

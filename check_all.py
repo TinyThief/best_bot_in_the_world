@@ -154,7 +154,7 @@ def check_database_per_tf() -> CheckResult:
         if not all_ok:
             return _warn(
                 f"по одному или нескольким ТФ меньше {min_need} свечей",
-                msg + " — запусти accumulate_db или full_backfill --extend.",
+                msg + " — запусти python bin/accumulate_db.py или python bin/full_backfill.py --extend.",
             )
         return _ok("по всем ТФ достаточно свечей для анализа", msg)
     except Exception as e:
@@ -183,7 +183,7 @@ def check_database_ohlc_outliers() -> CheckResult:
         parts = [f"{tf}:{cnt}" for tf, cnt in rows]
         return _warn(
             "в БД есть свечи с завышенными ценами (high/close > 100k)",
-            "По ТФ: " + ", ".join(parts) + ". Перезалей данные: refill_tf_d.py или full_backfill.",
+            "По ТФ: " + ", ".join(parts) + ". Перезалей данные: python bin/refill_tf_d.py или python bin/full_backfill.py.",
         )
     except Exception as e:
         return _fail("проверка выбросов БД", str(e))
@@ -288,7 +288,7 @@ def check_telegram() -> CheckResult:
 
 
 def check_scripts() -> CheckResult:
-    """Импорт скриптов: accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once."""
+    """Импорт скриптов: accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once, trend_daily_full, trend_backtest_report."""
     try:
         from src.scripts import (
             accumulate_db,
@@ -297,6 +297,8 @@ def check_scripts() -> CheckResult:
             backtest_trend,
             compare_phase_methods,
             test_run_once,
+            trend_daily_full,
+            trend_backtest_report,
         )
         ok = (
             hasattr(accumulate_db, "main")
@@ -305,11 +307,13 @@ def check_scripts() -> CheckResult:
             and hasattr(backtest_trend, "main")
             and hasattr(compare_phase_methods, "main")
             and hasattr(test_run_once, "run")
+            and hasattr(trend_daily_full, "main")
+            and hasattr(trend_backtest_report, "main")
         )
         if not ok:
             return _fail("у скриптов нет main/run", None)
         return _ok(
-            "accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once",
+            "accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once, trend_daily_full, trend_backtest_report",
             None,
         )
     except Exception as e:

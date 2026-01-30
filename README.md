@@ -35,31 +35,39 @@ pip install -r requirements.txt
 **Одноразовая догрузка БД до текущей даты** (если БД давно не обновлялась):
 
 ```bash
-python catch_up_db.py
+python bin/catch_up_db.py
 ```
 
-Скрипт догружает пропущенные свечи от последней в БД до «сейчас» по всем ТФ из `TIMEFRAMES_DB` и выводит дату последней свечи (ТФ D и 60). Для постоянного обновления используй `main.py` или `accumulate_db.py`.
+Скрипт догружает пропущенные свечи от последней в БД до «сейчас» по всем ТФ из `TIMEFRAMES_DB` и выводит дату последней свечи (ТФ D и 60). Для постоянного обновления используй `main.py` или `python bin/accumulate_db.py`.
 
 **Полное обновление БД** — удалить файл БД и заново загрузить все таймфреймы из `TIMEFRAMES_DB` с биржи (актуальные данные, один масштаб):
 
 ```bash
-python refresh_db.py
+python bin/refresh_db.py [--yes]
 ```
 
-Скрипт запросит подтверждение, затем удалит `data/klines.db` и загрузит историю по каждому ТФ из `.env` (TIMEFRAMES_DB). Перед запуском останови бота (`main.py`, `telegram_bot.py`). Без подтверждения: `python refresh_db.py --yes`. Если `python` не в PATH: `py -3 refresh_db.py` или полный путь к интерпретатору.
+Скрипт запросит подтверждение, затем удалит `data/klines.db` и загрузит историю по каждому ТФ из `.env` (TIMEFRAMES_DB). Перед запуском останови бота (`main.py`, `telegram_bot.py`). Без подтверждения: `--yes`.
 
 **Перезалив только дневного ТФ (D)** — если в БД по ТФ D попали некорректные цены (например миллионы вместо десятков тысяч):
 
 ```bash
-python refill_tf_d.py
+python bin/refill_tf_d.py
 ```
 
 Скрипт удаляет все свечи по выбранной паре и ТФ D, затем загружает историю заново с Bybit (с фильтром нереалистичных цен).
 
+**Дозаполнение пропусков в БД** — если на графике виден разрыв (например часть года пропала):
+
+```bash
+python bin/fill_gap_db.py
+```
+
+Скрипт по всем ТФ из TIMEFRAMES_DB подгружает недостающий диапазон между самой старой и самой новой свечой.
+
 **Накопление базы для обучения** (фьючерс BTC, все таймфреймы):
 
 ```bash
-python accumulate_db.py
+python bin/accumulate_db.py
 ```
 
 При первом запуске скрипт подключается к Bybit, создаёт SQLite-базу `data/klines.db` и по каждому таймфрейму из `TIMEFRAMES_DB` загружает историю (бэкфилл до `BACKFILL_MAX_CANDLES` свечей). Далее в цикле дотягивает новые свечи каждые `DB_UPDATE_INTERVAL_SEC` секунд. Остановка — **Ctrl+C**.
@@ -80,13 +88,13 @@ python telegram_bot.py
 
 Если `python` не в PATH — выполни `d:\python3.12.9\python.exe telegram_bot.py` из папки проекта.
 
-Нужен токен от [@BotFather](https://t.me/BotFather): создай бота, вставь токен в `.env` как `TELEGRAM_BOT_TOKEN`. Команды: `/start`, `/signal` — полный разбор и фазы по ТФ, `/status` — краткий статус одной строкой, `/db` — статистика БД, `/backtest_phases` — график бэктеста фаз, `/chart` — свечной график с трендами Вверх/Вниз/Флэт (из БД, ТФ D), `/id` — твой user id для TELEGRAM_ALLOWED_IDS, `/help`. Под ответами — кнопки «Обновить» и переключение Сигнал/БД. Ограничение доступа: `TELEGRAM_ALLOWED_IDS=123,456` в `.env`.
+Нужен токен от [@BotFather](https://t.me/BotFather): создай бота, вставь токен в `.env` как `TELEGRAM_BOT_TOKEN`. Команды: `/start`, `/signal` — полный разбор и фазы по ТФ, `/status` — краткий статус одной строкой, `/db` — статистика БД, `/backtest_phases` — график бэктеста фаз, `/chart` — свечной график (последние 2 года, ТФ D, из БД; при устаревших данных догружается только этот ТФ), `/trend_daily` — тренд по всей БД ТФ D с визуализацией (зоны Вверх/Вниз/Флэт), `/id` — твой user id для TELEGRAM_ALLOWED_IDS, `/help`. Под ответами — кнопки «Обновить» и переключение Сигнал/БД. Ограничение доступа: `TELEGRAM_ALLOWED_IDS=123,456` в `.env`.
 
 ## База данных для обучения
 
 - Файл по умолчанию: `data/klines.db` (путь задаётся в `DB_PATH`).
 - Таблица `klines`: `symbol`, `timeframe`, `start_time`, `open`, `high`, `low`, `close`, `volume`.
-- Один запуск `accumulate_db.py`: первый проход — бэкфилл по всем ТФ из `TIMEFRAMES_DB`, затем периодическое обновление. Ключи API для чтения свечей не нужны.
+- Один запуск `python bin/accumulate_db.py`: первый проход — бэкфилл по всем ТФ из `TIMEFRAMES_DB`, затем периодическое обновление. Ключи API для чтения свечей не нужны.
 
 В `.env` для накопления можно задать:
 
@@ -135,34 +143,16 @@ git checkout v1.0.0
 
 ## Структура проекта
 
-```
-best_bot_in_the_world/
-├── src/
-│   ├── core/               # config, database, exchange, logging_config
-│   ├── analysis/           # market_phases (6 фаз, Вайкофф + индикаторы), market_trend (тренд, режим рынка), multi_tf
-│   │                        # phase_wyckoff, phase_indicators, phase_structure — для сравнения
-│   ├── app/                # main, bot_loop, db_sync, telegram_bot
-│   ├── scripts/            # accumulate_db, backtest_phases, compare_phase_methods, full_backfill, test_run_once
-│   └── utils/              # validators, helpers, candle_quality
-├── strategies/             # Заготовка под стратегии
-├── tests/                  # unit/, integration/, backtest/
-├── data/                   # SQLite (data/klines.db), в .gitignore
-├── logs/                   # bot.log, signals.log, в .gitignore
-├── main.py                 # Точка входа: python main.py
-├── telegram_bot.py        # python telegram_bot.py
-├── accumulate_db.py        # python accumulate_db.py
-├── backtest_phases.py      # Бэктест фаз: python backtest_phases.py [--tf 60] [--tune]
-├── backtest_trend.py       # Бэктест тренда: python backtest_trend.py [--tf 60]
-├── compare_phase_methods.py # Сравнение методов фаз: python compare_phase_methods.py
-├── full_backfill.py        # python full_backfill.py [--clear] [--extend]
-├── refresh_db.py           # Удалить БД и загрузить все ТФ заново: python refresh_db.py [--yes]
-├── test_run_once.py        # python test_run_once.py
-├── check_all.py            # Проверка окружения: python check_all.py [--quick] [-v]
-├── release.py              # Версии и push: python release.py 1.0.0
-├── requirements.txt, .env.example
-├── README.md, AGENT_CONTEXT.md, ДЛЯ_КОМАНДЫ.md, CHANGELOG.md
-└── .cursorrules, .cursor/rules/
-```
+Полная карта проекта — **[STRUCTURE.md](STRUCTURE.md)** (дерево, таблицы «по полочкам», где что искать).
+
+Кратко:
+- **Запуск бота:** `main.py`, `telegram_bot.py`
+- **Работа с БД:** `python bin/catch_up_db.py`, `python bin/fill_gap_db.py`, `python bin/refresh_db.py`, `python bin/refill_tf_d.py`, `python bin/accumulate_db.py`, `python bin/full_backfill.py`
+- **Бэктесты:** `python bin/backtest_phases.py`, `python bin/backtest_trend.py`, `python bin/compare_phase_methods.py`, `python bin/test_run_once.py`
+- **Тренд по всей БД ТФ D с визуализацией:** `python bin/trend_daily_full.py` — загружает все дневные свечи, считает тренд на полной истории, сохраняет график в `data/trend_daily_D_<SYMBOL>.png` (опции: `--symbol`, `--lookback`, `--max-display`, `--output`)
+- **Отчёт по бэктесту тренда:** `python bin/trend_backtest_report.py [--tf D] [--all]` — строит график точности по направлениям (Вверх/Вниз/Флэт), сохраняет в `data/trend_backtest_D.png`
+- **Утилиты:** `check_all.py`, `release.py`
+- **Код:** `src/core` (конфиг, БД, биржа, db_helper), `src/analysis` (фазы, тренд, мультиТФ), `src/app` (цикл бота, Telegram), `src/scripts` (логика скриптов), `src/utils` (графики, качество свечей)
 
 ## Дальнейшие шаги
 

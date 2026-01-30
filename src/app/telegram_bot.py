@@ -1,6 +1,6 @@
 """
 Управление ботом через Telegram.
-Команды: /start, /help, /signal, /status, /db, /backtest_phases, /chart, /id.
+Команды: /start, /help, /signal, /status, /db, /backtest_phases, /chart, /trend_daily, /id.
 Reply-панель + inline-кнопки под сообщениями (Сигнал | БД | Обновить).
 Запуск: python telegram_bot.py (launcher в корне).
 """
@@ -12,7 +12,7 @@ import sqlite3
 import time
 
 from ..core import config
-from ..core.database import get_connection, get_db_path, count_candles
+from ..core.database import get_connection, get_db_path, get_candles, count_candles
 from ..core import db_helper
 from ..analysis.multi_tf import analyze_multi_timeframe
 from ..scripts.backtest_phases import run_for_chart
@@ -42,6 +42,7 @@ HELP_TEXT = """Команды:
 /db — статистика базы свечей
 /backtest_phases — график бэктеста фаз (весь период из БД)
 /chart — свечной график с трендами Вверх / Вниз / Флэт (из БД)
+/trend_daily — тренд по всей БД ТФ D: график с зонами Вверх / Вниз / Флэт (последние до 2000 свечей)
 /id — твой Telegram user id (для TELEGRAM_ALLOWED_IDS)
 /help — это сообщение"""
 
@@ -471,6 +472,51 @@ async def cmd_chart(update, context) -> None:
     await update.message.reply_photo(photo=buf, caption=caption[:1024])
 
 
+def _run_trend_daily_full(db_conn: sqlite3.Connection | None):
+    """Синхронно: загружает все D-свечи из БД, строит график тренда по всей истории. Возвращает (bytes_io, caption) или (None, error_text)."""
+    try:
+        from ..utils.backtest_chart import build_daily_trend_full_chart
+    except ImportError:
+        return None, "Для графиков нужен matplotlib: pip install matplotlib"
+    conn = db_conn or get_connection()
+    if conn is None:
+        return None, "БД недоступна."
+    symbol = config.SYMBOL or "BTCUSDT"
+    try:
+        cur = conn.cursor()
+        candles = get_candles(cur, symbol=symbol, timeframe="D", limit=None, order_asc=True)
+    finally:
+        if conn is not db_conn:
+            conn.close()
+    if not candles or len(candles) < 101:
+        return None, f"Недостаточно свечей ТФ D в БД (нужно минимум 101, есть {len(candles) if candles else 0}). Запустите bin/accumulate_db.py или bin/refill_tf_d.py."
+    try:
+        buf = build_daily_trend_full_chart(candles, symbol, lookback=100, max_candles_display=2000, dpi=120)
+        n_total = len(candles)
+        n_display = min(n_total, 2000)
+        caption = f"Тренд по всей БД ТФ D | {symbol}\nНа графике: последние {n_display} из {n_total} свечей (зоны Вверх / Вниз / Флэт)"
+        return buf, caption
+    except Exception as e:
+        logger.exception("Ошибка построения графика тренда по БД: %s", e)
+        return None, f"Ошибка построения графика: {e}"
+
+
+async def cmd_trend_daily(update, context) -> None:
+    """Команда /trend_daily: тренд по всей БД на таймфрейме D с визуализацией (зоны Вверх / Вниз / Флэт)."""
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    if hasattr(update.message, "reply_chat_action"):
+        await update.message.reply_chat_action("upload_photo")
+    db_conn = (context.bot_data.get("db_conn") if context and context.bot_data else None) or None
+    buf, caption = await asyncio.to_thread(_run_trend_daily_full, db_conn)
+    if buf is None:
+        await update.message.reply_text(caption)
+        return
+    buf.seek(0)
+    await update.message.reply_photo(photo=buf, caption=caption[:1024])
+
+
 async def handle_callback(update, context) -> None:
     """Обработка нажатий inline-кнопок."""
     q = update.callback_query
@@ -590,6 +636,7 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
                 BotCommand("db", "Статистика БД"),
                 BotCommand("backtest_phases", "График бэктеста фаз"),
                 BotCommand("chart", "Свечной график: тренды Вверх/Вниз/Флэт"),
+                BotCommand("trend_daily", "Тренд по всей БД ТФ D"),
                 BotCommand("id", "Мой user id"),
                 BotCommand("help", "Помощь"),
             ])
@@ -608,6 +655,7 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
     app.add_handler(CommandHandler("db", cmd_db))
     app.add_handler(CommandHandler("backtest_phases", cmd_backtest_phases))
     app.add_handler(CommandHandler("chart", cmd_chart))
+    app.add_handler(CommandHandler("trend_daily", cmd_trend_daily))
     app.add_handler(CommandHandler("id", cmd_id))
 
     app.add_handler(CallbackQueryHandler(handle_callback))

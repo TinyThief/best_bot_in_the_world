@@ -1,16 +1,14 @@
 """
 Дозаполнение пропусков в БД между самой старой и самой новой свечой по каждому ТФ.
+Запуск из корня: python bin/fill_gap_db.py
 
-Запуск: python fill_gap_db.py
-
-Полезно, если на графике /chart виден разрыв (например, часть 2025 года пропала):
-в БД есть старые и новые свечи, но нет данных за какой-то период. Скрипт запрашивает
-у биржи недостающий диапазон и вставляет только отсутствующие свечи (дубликаты не трогает).
+Полезно, если на графике /chart виден разрыв (например, часть года пропала).
 """
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 
 from src.core import config
 from src.core.database import get_connection, init_db

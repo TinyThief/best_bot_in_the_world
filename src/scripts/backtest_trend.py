@@ -152,7 +152,7 @@ def run_for_chart(
 def run(
     symbol: str | None = None,
     timeframe: str = "60",
-    max_bars: int = 50_000,
+    max_bars: int | None = 50_000,
     lookback: int = 100,
     forward_bars: int = 20,
     step: int = 5,
@@ -188,6 +188,7 @@ def run(
     print("Бэктест тренда | detect_trend vs форвард-доходность")
     print("=" * 60)
     print(f"Пара: {symbol}, ТФ: {timeframe}")
+    print(f"Свечей в выборке: {len(candles)}" + (" (вся БД)" if max_bars is None else f" (макс. {max_bars})"))
     print(f"Окно: lookback={lookback}, forward={forward_bars} бар, шаг={step}")
     print(f"Пороги «рост»/«падение»: {threshold_up:.2%} / {threshold_down:.2%}")
     if min_strength > 0:
@@ -228,6 +229,7 @@ def main() -> None:
     parser.add_argument("--symbol", default=None, help="Пара (по умолчанию из .env)")
     parser.add_argument("--tf", "--timeframe", dest="timeframe", default="60", help="Таймфрейм (по умолчанию 60)")
     parser.add_argument("--bars", type=int, default=50_000, help="Макс. свечей из БД (по умолчанию 50000)")
+    parser.add_argument("--all", dest="all_bars", action="store_true", help="Вся БД по паре и ТФ (игнорирует --bars)")
     parser.add_argument("--lookback", type=int, default=100, help="Окно для detect_trend (по умолчанию 100)")
     parser.add_argument("--forward", type=int, default=20, help="Баров вперёд для доходности (по умолчанию 20)")
     parser.add_argument("--step", type=int, default=5, help="Шаг по времени для ускорения")
@@ -239,7 +241,7 @@ def main() -> None:
     run(
         symbol=args.symbol or config.SYMBOL,
         timeframe=args.timeframe,
-        max_bars=args.bars,
+        max_bars=None if args.all_bars else args.bars,
         lookback=args.lookback,
         forward_bars=args.forward,
         step=args.step,

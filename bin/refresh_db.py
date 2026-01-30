@@ -1,12 +1,7 @@
 """Полное обновление БД: удаление файла и загрузка всех таймфреймов с биржи.
 
-Запуск (из корня проекта):
-  python refresh_db.py [--yes]
-  py -3 refresh_db.py [--yes]
-
-  --yes  без подтверждения (удобно для скриптов)
-
-Перед запуском останови бота и другие процессы, использующие БД (main.py, telegram_bot.py).
+Запуск из корня: python bin/refresh_db.py [--yes]
+Перед запуском останови бота (main.py, telegram_bot.py).
 """
 from __future__ import annotations
 
@@ -14,7 +9,8 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 
 from src.core import config
 from src.core.database import get_db_path, get_connection
@@ -62,7 +58,7 @@ def main() -> None:
             print(f"Файл удалён: {db_path}")
         except OSError as e:
             print(f"Не удалось удалить файл (возможно, БД открыта другим процессом): {e}")
-            print("Останови бота и повтори, либо используй: python full_backfill.py --clear")
+            print("Останови бота и повтори, либо используй: python bin/full_backfill.py --clear")
             sys.exit(1)
     else:
         print(f"Файл не найден (будет создан): {db_path}")

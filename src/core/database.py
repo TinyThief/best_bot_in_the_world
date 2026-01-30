@@ -40,11 +40,13 @@ def get_db_path() -> Path:
 
 
 def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
-    """Открывает соединение с БД, создаёт таблицу при первом запуске."""
+    """Открывает соединение с БД, создаёт таблицу при первом запуске. WAL — быстрее чтение/запись при нескольких процессах."""
     path = db_path or get_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path), check_same_thread=False)
     con.executescript(SCHEMA)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=5000")  # 5 с ожидания при блокировке (несколько процессов)
     return con
 
 

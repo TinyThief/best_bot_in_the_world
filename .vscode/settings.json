@@ -1,0 +1,6 @@
+{
+  "python.defaultInterpreterPath": "d:/python3.12.9/python.exe",
+  "terminal.integrated.env.windows": {
+    "PATH": "d:/python3.12.9;d:/python3.12.9/Scripts;${env:PATH}"
+  }
+}

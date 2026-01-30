@@ -27,6 +27,7 @@ from .market_phases import (
     _recent_return,
     _structure,
     _trend_strength,
+    _volume_ratio,
     _vwap_rolling,
 )
 
@@ -34,6 +35,27 @@ logger = logging.getLogger(__name__)
 
 TREND_NAMES_RU = {"up": "Вверх", "down": "Вниз", "flat": "Флэт"}
 REGIME_NAMES_RU = {"trend": "Тренд", "range": "Диапазон", "surge": "Всплеск"}
+
+# Адаптация по таймфрейму: короткие ТФ — быстрее реакция, длинные — плавнее (меньше шума).
+# short: 1,3,5,15,30 мин; long: 60,120,240,D,W,M. Конфиг .env по-прежнему имеет приоритет при явной настройке.
+TREND_PROFILES = {
+    "short": {"lookback": 80, "min_gap": 0.06, "min_gap_down": 0.05},
+    "long": {"lookback": 120, "min_gap": 0.10, "min_gap_down": 0.10},
+}
+
+
+def _tf_to_trend_profile(timeframe: str | None) -> str:
+    """Возвращает 'short' или 'long' по строке таймфрейма (как в фазах)."""
+    if not timeframe:
+        return "long"
+    tf = str(timeframe).strip().upper()
+    if tf in ("D", "W", "M"):
+        return "long"
+    try:
+        m = int(tf)
+        return "short" if m <= 30 else "long"
+    except ValueError:
+        return "long"
 
 
 def detect_regime(candles: list[dict[str, Any]], lookback: int = 50) -> dict[str, Any]:
@@ -89,6 +111,16 @@ def detect_trend(
     strength_min = getattr(config, "TREND_STRENGTH_MIN", 0.35)
     unclear_threshold = getattr(config, "TREND_UNCLEAR_THRESHOLD", 0.3)
     min_gap = getattr(config, "TREND_MIN_GAP", 0.08)
+    flat_when_range = getattr(config, "TREND_FLAT_WHEN_RANGE", True)
+    min_gap_down = getattr(config, "TREND_MIN_GAP_DOWN", 0.0)
+
+    # Адаптация по таймфрейму: short — мягче (быстрее реакция), long — строже (меньше шума)
+    use_profiles = getattr(config, "TREND_USE_PROFILES", True)
+    if use_profiles and timeframe:
+        prof = TREND_PROFILES.get(_tf_to_trend_profile(timeframe), TREND_PROFILES["long"])
+        lookback = prof["lookback"]
+        min_gap = prof["min_gap"]
+        min_gap_down = prof["min_gap_down"]
 
     if not candles or len(candles) < 30:
         return _build_trend_result(
@@ -129,6 +161,9 @@ def detect_trend(
         "return_5": round(ret_5, 4) if ret_5 is not None else None,
         "return_20": round(ret_20, 4) if ret_20 is not None else None,
     }
+    vol_ratio = _volume_ratio(c, short=5, long=20)
+    if vol_ratio is not None:
+        details["volume_ratio"] = round(vol_ratio, 3)
 
     # Накопление бычьих и медвежьих очков (0..1)
     bull = 0.0
@@ -163,18 +198,29 @@ def detect_trend(
             else:
                 bear += 0.06
 
-    # Сила тренда (направленное движение)
+    # Сила тренда (направленное движение) — усиленные веса для быстрой реакции на развороты
     ts = trend_str if trend_str is not None else 0.5
     if ret_5 is not None:
         if ret_5 > 0.005:
-            bull += 0.08 * min(1.0, ret_5 / 0.02)
+            bull += 0.10 * min(1.0, ret_5 / 0.02)
         elif ret_5 < -0.005:
-            bear += 0.08 * min(1.0, abs(ret_5) / 0.02)
+            bear += 0.10 * min(1.0, abs(ret_5) / 0.02)
     if ret_20 is not None:
         if ret_20 > 0.01:
-            bull += 0.1 * min(1.0, ret_20 / 0.05)
+            bull += 0.12 * min(1.0, ret_20 / 0.05)
         elif ret_20 < -0.01:
-            bear += 0.1 * min(1.0, abs(ret_20) / 0.05)
+            bear += 0.12 * min(1.0, abs(ret_20) / 0.05)
+
+    # Метрика _trend_strength (доля направленного движения по закрытиям): бонус при согласии с направлением
+    if ts > 0.55:
+        if structure == "up" or (ret_5 is not None and ret_5 > 0):
+            bull += 0.05 * min(1.0, (ts - 0.5) * 2)
+        elif structure == "down" or (ret_5 is not None and ret_5 < 0):
+            bear += 0.05 * min(1.0, (ts - 0.5) * 2)
+    elif ts < 0.35:
+        # Слабый тренд — слегка снижаем обе стороны, чаще получится flat
+        bull *= 0.95
+        bear *= 0.95
 
     # VWAP: цена выше/ниже
     vd = vwap_distance if vwap_distance is not None else 0.0
@@ -190,6 +236,15 @@ def detect_trend(
     elif obv < -0.03:
         bear += 0.08 * min(1.0, abs(obv) / 0.1)
 
+    # Объём: подтверждение тренда — рост объёма на движении усиливает сигнал
+    vr = vol_ratio if vol_ratio is not None else 1.0
+    if vr >= 1.15:
+        bonus = 0.03 * min(1.0, (vr - 1.0) / 0.5)
+        if bull > bear:
+            bull += bonus
+        elif bear > bull:
+            bear += bonus
+
     # Нормализуем суммы в 0..1 (каждая группа уже ограничена по смыслу)
     bull = min(1.0, bull)
     bear = min(1.0, bear)
@@ -201,13 +256,34 @@ def detect_trend(
         strength = bull
         secondary_strength = bear
     elif bear > bull and bear >= flat_threshold:
-        direction = "down"
-        strength = bear
-        secondary_strength = bull
+        # Строже для "вниз": требуем больший разрыв (меньше ложных down)
+        gap_down = bear - bull
+        if min_gap_down > 0 and gap_down < min_gap_down:
+            direction = "flat"
+            strength = bear
+            secondary_strength = bull
+        else:
+            direction = "down"
+            strength = bear
+            secondary_strength = bull
+            # Подтверждение «вниз»: хотя бы ADX (+DI/-DI) или структура согласны
+            di_bear = plus_di is not None and minus_di is not None and minus_di > plus_di
+            struct_bear = structure == "down"
+            if not (di_bear or struct_bear):
+                direction = "flat"
+                strength = max(bull, bear)
+                secondary_strength = min(bull, bear)
     else:
         direction = "flat"
         strength = max(bull, bear)
         secondary_strength = min(bull, bear)
+
+    # В боковике (ADX < 20) чаще возвращаем flat, если тренд не очень выражен
+    if flat_when_range and adx < 20 and direction in ("up", "down"):
+        if strength < 0.5 or (strength - secondary_strength) < 0.12:
+            direction = "flat"
+            strength = max(bull, bear)
+            secondary_strength = min(bull, bear)
 
     strength = round(strength, 4)
     strength_gap = round(max(0.0, strength - secondary_strength), 4)

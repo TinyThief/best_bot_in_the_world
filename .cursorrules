@@ -2,7 +2,7 @@
 
 ## Контекст
 - Мультитаймфреймовый бот для **Bybit** (pybit, REST V5). Пара по умолчанию — BTCUSDT (linear).
-- Структура: **src/core**, **src/analysis** (market_phases, market_trend, multi_tf), **src/app**, **src/scripts**, **src/utils**; **strategies/**; **tests/** (unit, integration, backtest). Лаунчеры в корне только поднимают sys.path и вызывают код из src.
+- Структура: **src/core**, **src/analysis** (market_phases, market_trend, multi_tf), **src/app**, **src/scripts**, **src/utils**; **bin/** (скрипты БД и бэктестов); **strategies/**; **tests/** (unit, integration, backtest). В корне — main.py, telegram_bot.py, check_all.py, release.py; остальные скрипты в bin/, запуск из корня: python bin/script.py.
 - Подробный контекст: **AGENT_CONTEXT.md**, **ДЛЯ_КОМАНДЫ.md**. Правила Cursor: **.cursor/rules/**.
 
 ## Безопасность

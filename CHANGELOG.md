@@ -10,6 +10,28 @@
 
 ---
 
+## [2.6.0] — 2026-01-30
+
+Структура bin/, конфиг на pydantic-settings, улучшения тренда, визуализация и тесты тренда, проверка скриптов в check_all.
+
+### Добавлено
+
+- **Структура bin/:** все лаунчеры БД и бэктестов перенесены в `bin/`; запуск из корня: `python bin/catch_up_db.py`, `python bin/accumulate_db.py` и т.д. В корне остаются `main.py`, `telegram_bot.py`, `check_all.py`, `release.py`. Добавлен **STRUCTURE.md** — карта проекта.
+- **Конфиг на pydantic-settings:** `src/core/config.py` переписан на `BaseSettings` (типизация, валидация из `.env`). В `requirements.txt` добавлен `pydantic-settings`.
+- **Тренд по всей БД ТФ D:** скрипт `bin/trend_daily_full.py` и `src/scripts/trend_daily_full.py` — загрузка всех D-свечей из БД, расчёт тренда по полной истории, график с зонами Вверх/Вниз/Флэт (`build_daily_trend_full_chart` в backtest_chart). В Telegram — команда `/trend_daily`.
+- **Отчёт по бэктесту тренда:** `bin/trend_backtest_report.py`, `src/scripts/trend_backtest_report.py` — график точности по направлениям (Вверх/Вниз/Флэт).
+- **Тесты тренда:** юнит-тесты `tests/unit/test_market_trend.py`; проверка точности на ТФ D `tests/backtest/test_trend_accuracy.py`.
+- **check_all:** в проверку скриптов добавлены `trend_daily_full`, `trend_backtest_report`; экспорт в `src/scripts/__init__.py`.
+
+### Изменено
+
+- **Алгоритм тренда (market_trend):** усилены веса return_5/return_20, метрика силы тренда, адаптация по ТФ (TREND_PROFILES short/long), ужесточено условие «вниз» (TREND_MIN_GAP_DOWN). В конфиг добавлены TREND_FLAT_WHEN_RANGE, TREND_MIN_GAP_DOWN, TREND_USE_PROFILES.
+- **БД (database.py):** включён режим WAL (`PRAGMA journal_mode=WAL`), `PRAGMA busy_timeout=5000`.
+- **Exchange:** для ТФ D/W/M порог интрадей-диапазона увеличен до 50%; таймаут запросов задаётся через EXCHANGE_REQUEST_TIMEOUT_SEC в конфиге.
+- **Документация:** README, AGENT_CONTEXT, ДЛЯ_КОМАНДЫ, STRUCTURE, bin/README — актуализированы пути (bin/), скрипты тренда, команды Telegram (/trend_daily).
+
+---
+
 ## [2.5.0] — 2026-01-30
 
 Промежуточная версия: модуль db_helper, дозаполнение пропусков в БД, график «последние 2 года» без искажений.
