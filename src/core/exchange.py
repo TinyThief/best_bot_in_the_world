@@ -22,9 +22,10 @@ BYBIT_INTERVALS = frozenset({"1", "3", "5", "15", "30", "60", "120", "240", "360
 EXCHANGE_MAX_RETRIES = getattr(config, "EXCHANGE_MAX_RETRIES", 5)
 EXCHANGE_RETRY_BACKOFF_SEC = getattr(config, "EXCHANGE_RETRY_BACKOFF_SEC", 1.0)
 
-# Допустимый диапазон цен (USDT) по парам для linear — чтобы не записать turnover вместо цены
+# Допустимый диапазон цен (USDT) по парам для linear — чтобы не записать мусор/ turnover вместо цены.
+# Для BTC реальные цены исторически до ~100–125k; выше — ошибочные данные от API.
 _PRICE_RANGE_BY_SYMBOL = {
-    "BTCUSDT": (1_000.0, 500_000.0),
+    "BTCUSDT": (1_000.0, 150_000.0),
     "ETHUSDT": (100.0, 100_000.0),
 }
 _DEFAULT_PRICE_RANGE = (0.01, 50_000_000.0)
@@ -41,28 +42,32 @@ def _get_price_range(symbol: str, category: str) -> tuple[float, float]:
     return _DEFAULT_PRICE_RANGE
 
 
+# Максимальный допустимый интрадей-диапазон (high-low)/open для любой свечи.
+# Реалистично для BTC: дневной диапазон обычно до 10–20%; 30% отсекает мусор (low/high далеко от тела).
+_MAX_OHLC_RANGE_RATIO = 0.30
+
+
 def _filter_valid_ohlc(
     candles: list[dict[str, Any]], symbol: str, category: str
 ) -> list[dict[str, Any]]:
     """
-    Отфильтровывает свечи с нереалистичными OHLC (например turnover вместо цены).
+    Отфильтровывает свечи с нереалистичными OHLC (например turnover вместо цены, абсурдный диапазон).
     Логирует отброшенные свечи. Применяется ко всем таймфреймам.
     """
     if not candles:
         return candles
     low_ok, high_ok = _get_price_range(symbol, category)
-    if low_ok <= 0 and high_ok >= 50_000_000:
-        return candles
     valid = []
     dropped = 0
     for c in candles:
         o, h, l, cl = c.get("open"), c.get("high"), c.get("low"), c.get("close")
         try:
-            mn = min(float(x) for x in (o, h, l, cl))
-            mx = max(float(x) for x in (o, h, l, cl))
+            o, h, l, cl = float(o), float(h), float(l), float(cl)
         except (TypeError, ValueError):
             dropped += 1
             continue
+        mn = min(o, h, l, cl)
+        mx = max(o, h, l, cl)
         if mn < low_ok or mx > high_ok:
             dropped += 1
             logger.warning(
@@ -70,9 +75,18 @@ def _filter_valid_ohlc(
                 low_ok, high_ok, symbol, c.get("start_time"), o, h, l, cl,
             )
             continue
+        if o and o > 0:
+            range_ratio = (h - l) / o
+            if range_ratio > _MAX_OHLC_RANGE_RATIO:
+                dropped += 1
+                logger.warning(
+                    "Свеча отброшена (абсурдный диапазон %.1f%%): symbol=%s ts=%s O=%.2f H=%.2f L=%.2f C=%.2f",
+                    range_ratio * 100, symbol, c.get("start_time"), o, h, l, cl,
+                )
+                continue
         valid.append(c)
     if dropped:
-        logger.warning("Всего отброшено свечей с неверным масштабом цен: %s (оставлено %s)", dropped, len(valid))
+        logger.warning("Всего отброшено свечей с неверным масштабом/диапазоном: %s (оставлено %s)", dropped, len(valid))
     return valid
 
 

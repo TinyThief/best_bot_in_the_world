@@ -12,7 +12,8 @@ import sqlite3
 import time
 
 from ..core import config
-from ..core.database import get_candles, get_connection, get_db_path, count_candles
+from ..core.database import get_connection, get_db_path, count_candles
+from ..core import db_helper
 from ..analysis.multi_tf import analyze_multi_timeframe
 from ..scripts.backtest_phases import run_for_chart
 from .db_sync import close, open_and_prepare, refresh_if_due
@@ -408,8 +409,12 @@ async def cmd_backtest_phases(update, context) -> None:
     await update.message.reply_photo(photo=buf, caption=caption[:1024])
 
 
-def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | None = None, timeframe: str = "D", limit: int = 1500, lookback: int = 100):
-    """Синхронно: загрузка свечей из БД + построение свечного графика с трендами (Вверх/Вниз/Флэт). Возвращает (bytes_io, caption) или (None, error_text)."""
+# Последние 2 года на дневном ТФ ≈ 730 свечей
+CHART_CANDLES_2Y = 730
+
+
+def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | None = None, timeframe: str = "D", limit: int = CHART_CANDLES_2Y, lookback: int = 100, show_trends: bool = False):
+    """Синхронно: при необходимости догружает ТФ до текущей даты, затем строит свечной график за последние limit дней. Возвращает (bytes_io, caption) или (None, error_text)."""
     try:
         from ..utils.backtest_chart import build_candlestick_trend_chart
     except ImportError:
@@ -418,21 +423,32 @@ def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | Non
     if conn is None:
         return None, "БД недоступна (TIMEFRAMES_DB пуст)."
     symbol = symbol or config.SYMBOL
+    min_candles = (lookback + 1) if show_trends else 2
     try:
-        cur = conn.cursor()
-        # Последние limit свечей (от новых к старым в запросе, в списке — от старых к новым для графика)
-        candles = get_candles(cur, symbol, timeframe, limit=limit, order_asc=False)
+        # db_helper: при устаревших данных догружает только этот ТФ, затем отдаёт последние limit дней (с кэшем)
+        candles = db_helper.ensure_fresh_then_get(conn, symbol, timeframe, days=limit, max_lag_sec=86400, use_cache=True)
     finally:
         if conn is not db_conn:
             conn.close()
-    if not candles or len(candles) < lookback + 1:
-        return None, f"Недостаточно свечей в БД для графика (нужно минимум {lookback + 1}, есть {len(candles) if candles else 0}). Запустите accumulate_db.py."
+    if not candles or len(candles) < min_candles:
+        return None, f"Недостаточно свечей в БД для графика (нужно минимум {min_candles}, есть {len(candles) if candles else 0}). Запустите accumulate_db.py."
     try:
         buf = build_candlestick_trend_chart(
-            candles, symbol, timeframe, lookback=lookback, dpi=120
+            candles, symbol, timeframe, lookback=lookback, show_trends=show_trends, dpi=120
         )
         tf_label = _tf_label(timeframe)
-        caption = f"Свечной график | {symbol} ТФ {tf_label} | Тренды (Вверх / Вниз / Флэт) | {len(candles)} свечей"
+        # Диапазон дат: первая и последняя свеча (последние limit свечей по времени)
+        from datetime import datetime
+        def _ts_to_date(ts):
+            s = ts / 1000 if ts > 1e10 else ts
+            return datetime.utcfromtimestamp(s).strftime("%d.%m.%Y")
+        date_first = _ts_to_date(candles[0]["start_time"]) if candles else "—"
+        date_last = _ts_to_date(candles[-1]["start_time"]) if candles else "—"
+        caption = (
+            f"Свечной график | {symbol} ТФ {tf_label} | последние {len(candles)} свечей\n"
+            f"Период: {date_first} — {date_last}"
+            + (" | Тренды (Вверх / Вниз / Флэт)" if show_trends else "")
+        )
         return buf, caption
     except Exception as e:
         logger.exception("Ошибка построения свечного графика: %s", e)
@@ -440,14 +456,14 @@ def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | Non
 
 
 async def cmd_chart(update, context) -> None:
-    """Команда /chart: свечной график с трендами (Вверх/Вниз/Флэт) из БД (по умолчанию ТФ D, до 1500 свечей)."""
+    """Команда /chart: свечной график из БД (по умолчанию ТФ D, последние 2 года ≈ 730 свечей). Без зон трендов — только свечи."""
     if not _check_allowed(_get_user_id(update)):
         await update.message.reply_text("Доступ запрещён.")
         return
     if hasattr(update.message, "reply_chat_action"):
         await update.message.reply_chat_action("typing")
     db_conn = (context.bot_data.get("db_conn") if context and context.bot_data else None) or None
-    buf, caption = await asyncio.to_thread(_run_candlestick_chart, db_conn, None, "D", 1500, 100)
+    buf, caption = await asyncio.to_thread(_run_candlestick_chart, db_conn, None, "D", CHART_CANDLES_2Y, 100)
     if buf is None:
         await update.message.reply_text(caption)
         return

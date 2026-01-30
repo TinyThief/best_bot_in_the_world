@@ -90,6 +90,44 @@ def run_update_for_timeframe(cursor, symbol: str, timeframe: str, limit: int = 5
     return insert_candles(cursor, symbol, timeframe, candles)
 
 
+def run_fill_gap_for_timeframe(cursor, symbol: str, timeframe: str) -> int:
+    """
+    Дозаполняет пропуски в БД между самой старой и самой новой свечой по этому ТФ.
+    Вызывать после catch_up, если на графике виден разрыв (например, часть года пропала).
+    Возвращает число вставленных свечей.
+    """
+    oldest_ms = get_oldest_start_time(cursor, symbol, timeframe)
+    latest_ms = get_latest_start_time(cursor, symbol, timeframe)
+    if oldest_ms is None or latest_ms is None or latest_ms <= oldest_ms:
+        return 0
+    interval_ms = _TF_MS.get(str(timeframe).strip().upper())
+    if not interval_ms:
+        return 0
+    total_inserted = 0
+    chunk = 1000
+    start_ms = oldest_ms + interval_ms
+    end_ms = latest_ms - interval_ms
+    if start_ms >= end_ms:
+        return 0
+    while start_ms < end_ms:
+        candles = get_klines(
+            symbol=symbol,
+            interval=timeframe,
+            category=config.BYBIT_CATEGORY,
+            limit=chunk,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        if not candles:
+            break
+        n = insert_candles(cursor, symbol, timeframe, candles)
+        total_inserted += n
+        if len(candles) < chunk:
+            break
+        start_ms = candles[-1]["start_time"] + interval_ms
+    return total_inserted
+
+
 def run_catch_up_for_timeframe(cursor, symbol: str, timeframe: str) -> int:
     """Догружает пропущенные свечи с момента последней в БД до текущего времени."""
     latest_ms = get_latest_start_time(cursor, symbol, timeframe)

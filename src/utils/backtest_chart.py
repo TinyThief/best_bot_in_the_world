@@ -19,6 +19,10 @@ import matplotlib.patches as mpatches  # noqa: E402
 from matplotlib.ticker import FuncFormatter  # noqa: E402
 import numpy as np  # noqa: E402
 
+# Цвета свечей в стиле TradingView: зелёный — бычья (close >= open), красный — медвежья
+CANDLE_COLOR_UP = "#26a67a"   # зелёный
+CANDLE_COLOR_DOWN = "#ef5350"  # красный
+
 
 def build_phases_chart(data: dict[str, Any], dpi: int = 120) -> io.BytesIO:
     """
@@ -225,18 +229,25 @@ def build_candlestick_trend_chart(
     timeframe: str,
     *,
     lookback: int = 100,
+    show_trends: bool = False,
+    scale_correction: bool = False,
+    max_candles_display: int = 730,
     dpi: int = 120,
     figsize: tuple[float, float] = (12, 6),
 ) -> io.BytesIO:
     """
-    Строит свечной график: свечи из БД и зоны трендов (Вверх / Вниз / Флэт) по detect_trend.
+    Строит свечной график из БД. Опционально — фоновые зоны трендов (Вверх / Вниз / Флэт) по detect_trend.
 
     candles: список dict с ключами start_time, open, high, low, close, volume (от старых к новым).
-    symbol, timeframe — для заголовка и расчёта тренда.
-    lookback: окно для detect_trend.
+    symbol, timeframe — для заголовка и (при show_trends) расчёта тренда.
+    lookback: окно для detect_trend (используется только при show_trends=True).
+    show_trends: если False — рисуются только свечи (без фоновых зон тренда).
+    scale_correction: если False — ось цены как в данных (как в TradingView). True — старая коррекция для BTC.
+    max_candles_display: максимум свечей на графике (по умолчанию 730 — последние 2 года на ТФ D).
     Возвращает BytesIO с PNG.
     """
-    if not candles or len(candles) < lookback + 1:
+    min_candles = (lookback + 1) if show_trends else 2
+    if not candles or len(candles) < min_candles:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
         ax.text(0.5, 0.5, "Недостаточно свечей для графика", ha="center", va="center", fontsize=14)
         ax.axis("off")
@@ -246,31 +257,50 @@ def build_candlestick_trend_chart(
         buf.seek(0)
         return buf
 
-    # Для BTC на дневном ТФ отсекаем свечи с нереалистичным движением (>50% за день) — часто биржевой мусор.
-    if timeframe == "D" and "BTC" in symbol.upper():
+    # Отсекаем свечи с мусором: цены вне 1k–150k и абсурдный диапазон (low/high далеко от тела).
+    # (high-low)/open > 30% для дневных — нереалистично; отсекает «длинные тени» с неверным low/high.
+    if "BTC" in symbol.upper():
+        price_lo, price_hi = 1_000.0, 150_000.0  # USDT для BTC
+        max_range_ratio = 0.30  # макс. (high-low)/open
         filtered = []
         for c in candles:
-            o, cl = float(c["open"]), float(c["close"])
-            if o and o > 0 and abs(cl - o) / o <= 0.5:
-                filtered.append(c)
-        if len(filtered) >= lookback + 1:
+            o = float(c.get("open", 0) or 0)
+            h = float(c.get("high", 0) or 0)
+            l_ = float(c.get("low", 0) or 0)
+            cl = float(c.get("close", 0) or 0)
+            if o <= 0:
+                continue
+            mn, mx = min(o, h, l_, cl), max(o, h, l_, cl)
+            if mn < price_lo or mx > price_hi:
+                continue
+            if (h - l_) / o > max_range_ratio:
+                continue
+            filtered.append(c)
+        if len(filtered) >= min_candles:
             candles = filtered
 
+    # Жёстко: только последние 730 дней от последней свечи (ровно 2 года на ТФ D).
+    if candles:
+        last_ts_ms = candles[-1]["start_time"] if candles[-1]["start_time"] > 1e10 else candles[-1]["start_time"] * 1000
+        cutoff_ts_ms = last_ts_ms - 730 * 24 * 3600 * 1000
+        candles = [c for c in candles if (c["start_time"] if c["start_time"] > 1e10 else c["start_time"] * 1000) >= cutoff_ts_ms]
+
+    n_total = len(candles)
+    # Ограничиваем число свечей на графике (макс. max_candles_display).
+    if n_total > max_candles_display:
+        candles = candles[-max_candles_display:]
     n = len(candles)
-    trend_ranges = _compute_trend_ranges(candles, lookback, timeframe)
+    trend_ranges = _compute_trend_ranges(candles, lookback, timeframe) if show_trends else {}
 
     opens = np.array([c["open"] for c in candles], dtype=float)
     highs = np.array([c["high"] for c in candles], dtype=float)
     lows = np.array([c["low"] for c in candles], dtype=float)
     closes = np.array([c["close"] for c in candles], dtype=float)
 
-    # Коррекция масштаба для BTC: в БД бывают завышенные значения (сотни тысяч / миллионы).
-    # 1) Если в выборке есть цены >100k — считаем это ошибкой и масштабируем ВСЁ вниз до 0–95k.
-    # 2) Иначе при двух диапазонах (старые 0–15k, новые 50k–100k) поднимаем старые к новым.
-    if "BTC" in symbol.upper():
+    # Коррекция масштаба для BTC только при scale_correction=True (по умолчанию — реальные цены, как в TradingView).
+    if scale_correction and "BTC" in symbol.upper():
         max_high = float(np.max(highs))
         if max_high > 100_000:
-            # Завышенные данные (в т.ч. миллионы) — приводим весь график к нормальному масштабу.
             scale = max_high / 95_000.0
             opens = opens / scale
             highs = highs / scale
@@ -289,7 +319,10 @@ def build_candlestick_trend_chart(
                     lows = np.where(low_band, lows * scale_low, lows)
                     closes = np.where(low_band, closes * scale_low, closes)
 
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    # Ширина графика: при большом числе свечей увеличиваем, чтобы тела были видны (как в TradingView)
+    fig_w = min(24.0, max(figsize[0], 12.0 + n * 0.015))
+    fig_h = figsize[1]
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
     ax.set_facecolor("white")
     fig.patch.set_facecolor("white")
     ax.grid(True, alpha=0.3, linestyle="-")
@@ -298,31 +331,41 @@ def build_candlestick_trend_chart(
     y_min_glob = float(min(lows.min(), opens.min(), closes.min()))
     y_max_glob = float(max(highs.max(), opens.max(), closes.max()))
 
-    # Зоны трендов: Вверх (зелёный), Вниз (красный), Флэт (серый) — полупрозрачная заливка по всей высоте
-    for direction in ("up", "down", "flat"):
-        color = TREND_CHART_COLORS.get(direction, "#95a5a6")
-        for (i0, i1) in trend_ranges.get(direction, []):
-            ax.axvspan(i0 - 0.5, i1 + 0.5, facecolor=color, alpha=0.25)
+    # Зоны трендов (только при show_trends): Вверх (зелёный), Вниз (красный), Флэт (серый)
+    if show_trends:
+        for direction in ("up", "down", "flat"):
+            color = TREND_CHART_COLORS.get(direction, "#95a5a6")
+            for (i0, i1) in trend_ranges.get(direction, []):
+                ax.axvspan(i0 - 0.5, i1 + 0.5, facecolor=color, alpha=0.25)
 
-    # Свечи: тело + тени
-    width = 0.7
+    # Свечи в стиле TradingView: тело (open–close) + нижняя тень (low–min) + верхняя тень (max–high).
+    # Для дожи (open==close) тело рисуем с минимальной высотой, верхняя тень начинается от верха тела.
+    min_body_height = (y_max_glob - y_min_glob) * 0.0005
+    width = min(0.85, 0.5 + 300.0 / max(n, 1))
+    wick_lw = 1.0
     for i in range(n):
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-        color = "#26a69a" if c >= o else "#ef5350"
-        # Тень
-        ax.plot([i, i], [l, h], color=color, linewidth=0.8, solid_capstyle="round")
-        # Тело
+        color = CANDLE_COLOR_UP if c >= o else CANDLE_COLOR_DOWN
         body_bottom = min(o, c)
-        body_height = abs(c - o)
-        if body_height < (y_max_glob - y_min_glob) * 0.001:
-            body_height = (y_max_glob - y_min_glob) * 0.001
+        body_top_real = max(o, c)
+        body_height_real = body_top_real - body_bottom
+        # Высота тела для отрисовки: не меньше min_body_height (чтобы дожи был виден)
+        body_height_draw = max(body_height_real, min_body_height)
+        body_top_draw = body_bottom + body_height_draw
+        # Нижняя тень: от low до низа тела
+        if l < body_bottom - 1e-9:
+            ax.plot([i, i], [l, body_bottom], color=color, linewidth=wick_lw, solid_capstyle="round")
+        # Верхняя тень: от верха тела (рисованного) до high
+        if h > body_top_draw + 1e-9:
+            ax.plot([i, i], [body_top_draw, h], color=color, linewidth=wick_lw, solid_capstyle="round")
+        # Тело свечи: прямоугольник от body_bottom до body_top_draw
         rect = plt.Rectangle(
             (i - width / 2, body_bottom),
             width,
-            body_height,
+            body_height_draw,
             facecolor=color,
             edgecolor=color,
-            linewidth=0.5,
+            linewidth=0.6,
         )
         ax.add_patch(rect)
 
@@ -349,7 +392,7 @@ def build_candlestick_trend_chart(
         ha="right",
     )
 
-    # Блок данных по последней свече (уже в правильном масштабе после возможной коррекции)
+    # Блок данных по последней свече и диапазон цен на графике (для сверки с TradingView)
     last_ts = candles[-1]["start_time"]
     last_ts_sec = last_ts / 1000 if last_ts > 1e10 else last_ts
     last_date_str = datetime.utcfromtimestamp(last_ts_sec).strftime("%d.%m.%Y")
@@ -358,8 +401,9 @@ def build_candlestick_trend_chart(
     change_pct = (change / o * 100) if o and o != 0 else 0
     text_box = (
         f"Последняя свеча: {last_date_str}\n"
-        f"ОТКР {o:,.1f}\nМАКС {h:,.1f}\nМИН {l:,.1f}\nЗАКР {c:,.1f}\n"
-        f"Change {change:+,.1f} ({change_pct:+.2f}%)"
+        f"ОТКР {o:,.1f}  МАКС {h:,.1f}\nМИН {l:,.1f}  ЗАКР {c:,.1f}\n"
+        f"Change {change:+,.1f} ({change_pct:+.2f}%)\n"
+        f"Диапазон на графике: {y_min_glob:,.0f} – {y_max_glob:,.0f}"
     )
     ax.text(
         0.02,
@@ -372,15 +416,16 @@ def build_candlestick_trend_chart(
         family="monospace",
     )
 
-    # Легенда: Вверх / Вниз / Флэт
-    legend_handles = [
-        mpatches.Patch(color=TREND_CHART_COLORS["up"], alpha=0.25, label=TREND_NAMES_RU_CHART["up"]),
-        mpatches.Patch(color=TREND_CHART_COLORS["down"], alpha=0.25, label=TREND_NAMES_RU_CHART["down"]),
-        mpatches.Patch(color=TREND_CHART_COLORS["flat"], alpha=0.25, label=TREND_NAMES_RU_CHART["flat"]),
-    ]
-    ax.legend(handles=legend_handles, loc="upper right", fontsize=9)
+    if show_trends:
+        legend_handles = [
+            mpatches.Patch(color=TREND_CHART_COLORS["up"], alpha=0.25, label=TREND_NAMES_RU_CHART["up"]),
+            mpatches.Patch(color=TREND_CHART_COLORS["down"], alpha=0.25, label=TREND_NAMES_RU_CHART["down"]),
+            mpatches.Patch(color=TREND_CHART_COLORS["flat"], alpha=0.25, label=TREND_NAMES_RU_CHART["flat"]),
+        ]
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=9)
 
-    ax.set_title(f"{symbol}  |  ТФ {timeframe}  |  Тренды (Вверх / Вниз / Флэт)  |  {n} свечей")
+    title_n = f"последние {n} из {n_total} свечей" if n_total > n else f"{n} свечей"
+    ax.set_title(f"{symbol}  |  ТФ {timeframe}  |  {title_n}" + ("  |  Тренды (Вверх / Вниз / Флэт)" if show_trends else ""))
     plt.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
