@@ -22,6 +22,59 @@ BYBIT_INTERVALS = frozenset({"1", "3", "5", "15", "30", "60", "120", "240", "360
 EXCHANGE_MAX_RETRIES = getattr(config, "EXCHANGE_MAX_RETRIES", 5)
 EXCHANGE_RETRY_BACKOFF_SEC = getattr(config, "EXCHANGE_RETRY_BACKOFF_SEC", 1.0)
 
+# Допустимый диапазон цен (USDT) по парам для linear — чтобы не записать turnover вместо цены
+_PRICE_RANGE_BY_SYMBOL = {
+    "BTCUSDT": (1_000.0, 500_000.0),
+    "ETHUSDT": (100.0, 100_000.0),
+}
+_DEFAULT_PRICE_RANGE = (0.01, 50_000_000.0)
+
+
+def _get_price_range(symbol: str, category: str) -> tuple[float, float]:
+    """Возвращает (min_price, max_price) для проверки OHLC. Только linear."""
+    if category != "linear":
+        return _DEFAULT_PRICE_RANGE
+    sym = (symbol or "").strip().upper()
+    for key, rng in _PRICE_RANGE_BY_SYMBOL.items():
+        if key in sym or sym in key:
+            return rng
+    return _DEFAULT_PRICE_RANGE
+
+
+def _filter_valid_ohlc(
+    candles: list[dict[str, Any]], symbol: str, category: str
+) -> list[dict[str, Any]]:
+    """
+    Отфильтровывает свечи с нереалистичными OHLC (например turnover вместо цены).
+    Логирует отброшенные свечи. Применяется ко всем таймфреймам.
+    """
+    if not candles:
+        return candles
+    low_ok, high_ok = _get_price_range(symbol, category)
+    if low_ok <= 0 and high_ok >= 50_000_000:
+        return candles
+    valid = []
+    dropped = 0
+    for c in candles:
+        o, h, l, cl = c.get("open"), c.get("high"), c.get("low"), c.get("close")
+        try:
+            mn = min(float(x) for x in (o, h, l, cl))
+            mx = max(float(x) for x in (o, h, l, cl))
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        if mn < low_ok or mx > high_ok:
+            dropped += 1
+            logger.warning(
+                "Свеча отброшена (цена вне диапазона %s–%s USDT): symbol=%s ts=%s O=%.2f H=%.2f L=%.2f C=%.2f",
+                low_ok, high_ok, symbol, c.get("start_time"), o, h, l, cl,
+            )
+            continue
+        valid.append(c)
+    if dropped:
+        logger.warning("Всего отброшено свечей с неверным масштабом цен: %s (оставлено %s)", dropped, len(valid))
+    return valid
+
 
 def _session() -> HTTP:
     """Единая сессия Bybit HTTP (только маркет-данные — ключи не обязательны)."""
@@ -131,7 +184,8 @@ def get_klines(
     out = _request_kline(session, **params)
 
     raw_list = out.get("result", {}).get("list") or []
-    return _parse_kline_list(raw_list)
+    parsed = _parse_kline_list(raw_list)
+    return _filter_valid_ohlc(parsed, symbol, category)
 
 
 def get_klines_multi_timeframe(
@@ -190,6 +244,9 @@ def fetch_klines_backfill(
         if not raw_list:
             break
         chunk = _parse_kline_list(raw_list)
+        chunk = _filter_valid_ohlc(chunk, symbol, category)
+        if not chunk:
+            break
         current_end = min(c["start_time"] for c in chunk) - 1
         all_rows = chunk + all_rows
         if len(chunk) < limit_per_request:

@@ -12,3 +12,6 @@ numpy>=1.24.0
 python-telegram-bot>=21.0
 pytz  # для APScheduler/JobQueue (часы и отложенные задачи)
 
+# Графики бэктеста для Telegram
+matplotlib>=3.7.0
+

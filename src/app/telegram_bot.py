@@ -1,6 +1,6 @@
 """
 Управление ботом через Telegram.
-Команды: /start, /help, /signal, /status, /db, /id.
+Команды: /start, /help, /signal, /status, /db, /backtest_phases, /chart, /id.
 Reply-панель + inline-кнопки под сообщениями (Сигнал | БД | Обновить).
 Запуск: python telegram_bot.py (launcher в корне).
 """
@@ -12,8 +12,9 @@ import sqlite3
 import time
 
 from ..core import config
-from ..core.database import get_connection, get_db_path, count_candles
+from ..core.database import get_candles, get_connection, get_db_path, count_candles
 from ..analysis.multi_tf import analyze_multi_timeframe
+from ..scripts.backtest_phases import run_for_chart
 from .db_sync import close, open_and_prepare, refresh_if_due
 
 try:
@@ -38,6 +39,8 @@ HELP_TEXT = """Команды:
 /signal — полный разбор: сигнал и фазы по таймфреймам
 /status — одна строка: сигнал и старший таймфрейм
 /db — статистика базы свечей
+/backtest_phases — график бэктеста фаз (весь период из БД)
+/chart — свечной график с трендами Вверх / Вниз / Флэт (из БД)
 /id — твой Telegram user id (для TELEGRAM_ALLOWED_IDS)
 /help — это сообщение"""
 
@@ -367,6 +370,91 @@ async def cmd_id(update, context) -> None:
     )
 
 
+def _run_backtest_phases_and_chart():
+    """Синхронно: бэктест фаз + построение графика. Возвращает (bytes_io, caption) или (None, error_text). Используется весь период из БД (max_bars=None)."""
+    try:
+        from ..utils.backtest_chart import build_phases_chart
+    except ImportError as e:
+        return None, "Для графиков нужен matplotlib: pip install matplotlib"
+    data = run_for_chart(timeframe="60", max_bars=None, step=5, min_score=0.0)
+    if not data:
+        return None, "Недостаточно данных в БД для бэктеста (нужны свечи по ТФ 60)."
+    try:
+        buf = build_phases_chart(data, dpi=120)
+        stats = data.get("stats") or {}
+        acc = stats.get("total_accuracy", 0) * 100
+        total_n = stats.get("total_n", 0)
+        symbol = stats.get("symbol", config.SYMBOL)
+        bars_used = data.get("bars_used")
+        period_str = f"{bars_used} свечей" if bars_used is not None else ""
+        caption = f"Бэктест фаз | {symbol} ТФ 60 | весь период ({period_str}) | Точность: {acc:.1f}% (n={total_n})"
+        return buf, caption
+    except Exception as e:
+        logger.exception("Ошибка построения графика бэктеста: %s", e)
+        return None, f"Ошибка построения графика: {e}"
+
+
+async def cmd_backtest_phases(update, context) -> None:
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    if hasattr(update.message, "reply_chat_action"):
+        await update.message.reply_chat_action("typing")
+    buf, caption = await asyncio.to_thread(_run_backtest_phases_and_chart)
+    if buf is None:
+        await update.message.reply_text(caption)
+        return
+    buf.seek(0)
+    await update.message.reply_photo(photo=buf, caption=caption[:1024])
+
+
+def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | None = None, timeframe: str = "D", limit: int = 1500, lookback: int = 100):
+    """Синхронно: загрузка свечей из БД + построение свечного графика с трендами (Вверх/Вниз/Флэт). Возвращает (bytes_io, caption) или (None, error_text)."""
+    try:
+        from ..utils.backtest_chart import build_candlestick_trend_chart
+    except ImportError:
+        return None, "Для графиков нужен matplotlib: pip install matplotlib"
+    conn = db_conn or get_connection()
+    if conn is None:
+        return None, "БД недоступна (TIMEFRAMES_DB пуст)."
+    symbol = symbol or config.SYMBOL
+    try:
+        cur = conn.cursor()
+        # Последние limit свечей (от новых к старым в запросе, в списке — от старых к новым для графика)
+        candles = get_candles(cur, symbol, timeframe, limit=limit, order_asc=False)
+    finally:
+        if conn is not db_conn:
+            conn.close()
+    if not candles or len(candles) < lookback + 1:
+        return None, f"Недостаточно свечей в БД для графика (нужно минимум {lookback + 1}, есть {len(candles) if candles else 0}). Запустите accumulate_db.py."
+    try:
+        buf = build_candlestick_trend_chart(
+            candles, symbol, timeframe, lookback=lookback, dpi=120
+        )
+        tf_label = _tf_label(timeframe)
+        caption = f"Свечной график | {symbol} ТФ {tf_label} | Тренды (Вверх / Вниз / Флэт) | {len(candles)} свечей"
+        return buf, caption
+    except Exception as e:
+        logger.exception("Ошибка построения свечного графика: %s", e)
+        return None, f"Ошибка построения графика: {e}"
+
+
+async def cmd_chart(update, context) -> None:
+    """Команда /chart: свечной график с трендами (Вверх/Вниз/Флэт) из БД (по умолчанию ТФ D, до 1500 свечей)."""
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    if hasattr(update.message, "reply_chat_action"):
+        await update.message.reply_chat_action("typing")
+    db_conn = (context.bot_data.get("db_conn") if context and context.bot_data else None) or None
+    buf, caption = await asyncio.to_thread(_run_candlestick_chart, db_conn, None, "D", 1500, 100)
+    if buf is None:
+        await update.message.reply_text(caption)
+        return
+    buf.seek(0)
+    await update.message.reply_photo(photo=buf, caption=caption[:1024])
+
+
 async def handle_callback(update, context) -> None:
     """Обработка нажатий inline-кнопок."""
     q = update.callback_query
@@ -484,6 +572,8 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
                 BotCommand("signal", "Сигнал и фазы по таймфреймам"),
                 BotCommand("status", "Краткий статус (одна строка)"),
                 BotCommand("db", "Статистика БД"),
+                BotCommand("backtest_phases", "График бэктеста фаз"),
+                BotCommand("chart", "Свечной график: тренды Вверх/Вниз/Флэт"),
                 BotCommand("id", "Мой user id"),
                 BotCommand("help", "Помощь"),
             ])
@@ -500,6 +590,8 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
     app.add_handler(CommandHandler("signal", cmd_signal))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("db", cmd_db))
+    app.add_handler(CommandHandler("backtest_phases", cmd_backtest_phases))
+    app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("id", cmd_id))
 
     app.add_handler(CallbackQueryHandler(handle_callback))

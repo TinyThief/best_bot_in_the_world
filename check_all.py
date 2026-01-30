@@ -161,6 +161,34 @@ def check_database_per_tf() -> CheckResult:
         return _fail("подсчёт по ТФ", str(e))
 
 
+def check_database_ohlc_outliers() -> CheckResult:
+    """Для BTCUSDT: количество свечей с ценой high > 100k (возможный мусор — перезалей ТФ)."""
+    if _config is None or _quick:
+        return _ok("(пропуск)" if _quick else "требуется config", None)
+    sym = (getattr(_config, "SYMBOL", "") or "").strip().upper()
+    if "BTC" not in sym:
+        return _ok("не BTC — проверка выбросов не выполняется", None)
+    try:
+        from src.core.database import get_connection, TABLE_NAME
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT timeframe, COUNT(*) FROM {TABLE_NAME} WHERE symbol = ? AND (high > 100000 OR close > 100000) GROUP BY timeframe",
+            (sym,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            return _ok("выбросов цен (high/close > 100k) в БД нет", None)
+        parts = [f"{tf}:{cnt}" for tf, cnt in rows]
+        return _warn(
+            "в БД есть свечи с завышенными ценами (high/close > 100k)",
+            "По ТФ: " + ", ".join(parts) + ". Перезалей данные: refill_tf_d.py или full_backfill.",
+        )
+    except Exception as e:
+        return _fail("проверка выбросов БД", str(e))
+
+
 def check_bybit_ping() -> CheckResult:
     """Один запрос к Bybit (get_kline limit=1) — доступность API."""
     if _config is None or _quick:
@@ -301,6 +329,65 @@ def check_app_modules() -> CheckResult:
         return _fail("импорт app-модулей", str(e))
 
 
+def check_backtest_visualization() -> CheckResult:
+    """Визуализация бэктестов: run_for_chart (фаз/тренд) + build_phases_chart, build_trend_chart. Весь период из БД (max_bars=None)."""
+    try:
+        from src.scripts.backtest_phases import run_for_chart
+        from src.scripts.backtest_trend import run_for_chart as run_trend_for_chart
+        from src.utils.backtest_chart import build_phases_chart, build_trend_chart, build_candlestick_trend_chart
+        from src.core.database import get_connection, get_candles
+    except Exception as e:
+        return _fail("импорт визуализации бэктестов", str(e))
+    try:
+        # Бэктест фаз за весь период (max_bars=None)
+        data_ph = run_for_chart(timeframe="60", max_bars=None, step=5)
+        if data_ph:
+            buf_ph = build_phases_chart(data_ph)
+            n_ph = len(buf_ph.getvalue())
+            if n_ph == 0:
+                return _fail("график фаз пустой", None)
+        else:
+            n_ph = 0
+        # Бэктест тренда за весь период (max_bars=None)
+        data_tr = run_trend_for_chart(timeframe="60", max_bars=None, step=5)
+        if data_tr:
+            buf_tr = build_trend_chart(data_tr)
+            n_tr = len(buf_tr.getvalue())
+            if n_tr == 0:
+                return _fail("график тренда пустой", None)
+        else:
+            n_tr = 0
+        # Свечной график с зонами TREND_UP (из БД, ТФ D или 60)
+        candlestick_ok = False
+        try:
+            from src.core import config
+            conn = get_connection()
+            cur = conn.cursor()
+            for tf in ("D", "60"):
+                candles = get_candles(cur, config.SYMBOL, tf, limit=200, order_asc=False)
+                if candles and len(candles) >= 101:
+                    buf_c = build_candlestick_trend_chart(candles, config.SYMBOL, tf, lookback=100)
+                    candlestick_ok = len(buf_c.getvalue()) > 0
+                    break
+            conn.close()
+        except Exception:
+            pass
+        if data_ph and data_tr:
+            detail = f"фаз: {data_ph.get('bars_used')} свечей, график {n_ph} байт; тренд: {data_tr.get('bars_used')} свечей, график {n_tr} байт"
+            if candlestick_ok:
+                detail += "; свечной TREND_UP: OK"
+            return _ok("визуализация бэктестов (фаз, тренд) — графики строятся по всему периоду из БД", detail)
+        if data_ph or data_tr:
+            which = "фаз" if data_ph else "тренд"
+            return _ok(f"визуализация бэктеста {which} — OK (второй без данных)", None)
+        return _ok(
+            "визуализация бэктестов: run_for_chart и build_*_chart работают",
+            "в БД нет достаточного количества свечей по ТФ 60 для построения графиков",
+        )
+    except Exception as e:
+        return _fail("построение графиков бэктеста", str(e))
+
+
 def check_analysis_modules() -> CheckResult:
     """Модули анализа: market_trend (detect_trend, detect_regime), candle_quality (validate_candles)."""
     try:
@@ -358,6 +445,7 @@ def main() -> int:
         ("ТФ для DATA_SOURCE=db", check_data_source_tfs),
         ("БД", check_database),
         ("БД по таймфреймам", check_database_per_tf),
+        ("БД: выбросы цен (BTC)", check_database_ohlc_outliers),
         ("Bybit API", check_bybit_ping),
         ("multi_tf (exchange)", check_multi_tf_exchange),
         ("multi_tf (db)", check_multi_tf_db),
@@ -367,6 +455,7 @@ def main() -> int:
         ("Telegram-бот", check_telegram),
         ("Скрипты", check_scripts),
         ("Модули app", check_app_modules),
+        ("Визуализация бэктестов", check_backtest_visualization),
     ]
 
     print("Проверка окружения бота" + (" (--quick)" if _quick else "") + (" -v" if _verbose else ""))

@@ -81,6 +81,74 @@ def _run_one(
     return returns_by_direction, stats
 
 
+def run_for_chart(
+    symbol: str | None = None,
+    timeframe: str = "60",
+    max_bars: int | None = None,
+    lookback: int = 100,
+    forward_bars: int = 20,
+    step: int = 5,
+    threshold_up: float = 0.005,
+    threshold_down: float = -0.005,
+    min_strength: float = 0.0,
+) -> dict[str, Any] | None:
+    """
+    Запуск бэктеста тренда и возврат данных для визуализации (график в Telegram и т.п.).
+
+    max_bars: если None — используются все свечи по паре и таймфрейму из БД (весь период).
+    Возвращает dict: stats (total_accuracy, up_ok, up_total, down_ok, down_total, flat_count, symbol, timeframe),
+    direction_summary (список по направлениям up/down/flat: name_ru, count, mean_ret, pct_positive, pct_up, pct_down).
+    При ошибке или недостатке данных возвращает None.
+    """
+    symbol = symbol or config.SYMBOL
+    conn = get_connection()
+    cur = conn.cursor()
+    candles = get_candles(cur, symbol, timeframe, limit=max_bars, order_asc=False)
+    conn.close()
+
+    if len(candles) < lookback + forward_bars:
+        return None
+
+    returns_by_direction, stats = _run_one(
+        candles, symbol, timeframe, lookback, forward_bars, step,
+        threshold_up, threshold_down, min_strength=min_strength,
+    )
+    min_strength_used = stats.get("min_strength", 0.0)
+
+    def _filter(lst: list[tuple[float, float, float]], direction: str) -> list[tuple[float, float, float]]:
+        if direction == "flat":
+            return lst
+        return [(r, s, c) for r, s, c in lst if s >= min_strength_used]
+
+    direction_summary: list[dict[str, Any]] = []
+    for direction in ("up", "down", "flat"):
+        lst = _filter(returns_by_direction[direction], direction)
+        if not lst:
+            continue
+        rets = [r for r, _, _ in lst]
+        mean_ret = sum(rets) / len(rets)
+        pct_up = sum(1 for r in rets if r >= threshold_up) / len(rets) * 100
+        pct_down = sum(1 for r in rets if r <= threshold_down) / len(rets) * 100
+        pct_positive = sum(1 for r in rets if r > 0) / len(rets) * 100
+        direction_summary.append({
+            "direction": direction,
+            "name_ru": TREND_NAMES_RU.get(direction, direction),
+            "count": len(lst),
+            "mean_ret": mean_ret,
+            "pct_positive": pct_positive,
+            "pct_up": pct_up,
+            "pct_down": pct_down,
+        })
+
+    return {
+        "stats": stats,
+        "direction_summary": direction_summary,
+        "threshold_up": threshold_up,
+        "threshold_down": threshold_down,
+        "bars_used": len(candles),
+    }
+
+
 def run(
     symbol: str | None = None,
     timeframe: str = "60",

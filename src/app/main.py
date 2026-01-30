@@ -58,7 +58,8 @@ def main() -> None:
         config.POLL_INTERVAL_SEC,
     )
 
-    last_db_ts = time.time()
+    # 0 — чтобы первый тик сразу обновил БД (догрузка до текущей даты), дальше по таймеру
+    last_db_ts = 0.0
     try:
         while True:
             last_db_ts = run_one_tick(db_conn, last_db_ts)

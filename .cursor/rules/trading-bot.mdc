@@ -19,8 +19,8 @@ best_bot_in_the_world/
 │   ├── core/           # config, database, exchange, logging_config
 │   ├── analysis/       # market_phases, market_trend (тренд, режим рынка), multi_tf; phase_* (сравнение)
 │   ├── app/            # main, bot_loop, db_sync, telegram_bot
-│   ├── scripts/        # accumulate_db, backtest_phases, backtest_trend, compare_phase_methods, full_backfill, test_run_once
-│   └── utils/          # validators, helpers, candle_quality
+│   ├── scripts/        # accumulate_db, backtest_phases, backtest_trend, compare_phase_methods, full_backfill, refill_tf_d, test_run_once
+│   └── utils/          # validators, helpers, candle_quality, backtest_chart
 ├── strategies/         # будущие стратегии (trend_following, scalping и т.д.)
 ├── tests/
 │   ├── unit/
@@ -29,7 +29,7 @@ best_bot_in_the_world/
 ├── data/               # klines.db, при необходимости historical/
 ├── logs/               # bot.log, signals.log
 ├── .env, .env.example, .gitignore
-├── main.py, telegram_bot.py, ...  # лаунчеры в корне
+├── main.py, telegram_bot.py, refresh_db.py, refill_tf_d.py, catch_up_db.py, ...  # лаунчеры в корне
 ├── check_all.py, release.py
 └── AGENT_CONTEXT.md, ДЛЯ_КОМАНДЫ.md
 ```

@@ -134,6 +134,17 @@ def delete_klines_for_symbol(cursor: sqlite3.Cursor, symbol: str) -> int:
     return cursor.rowcount
 
 
+def delete_klines_for_symbol_timeframe(
+    cursor: sqlite3.Cursor, symbol: str, timeframe: str
+) -> int:
+    """Удаляет все свечи по символу и таймфрейму. Возвращает количество удалённых строк."""
+    cursor.execute(
+        f"DELETE FROM {TABLE_NAME} WHERE symbol = ? AND timeframe = ?",
+        (symbol, timeframe),
+    )
+    return cursor.rowcount
+
+
 def get_candles(
     cursor: sqlite3.Cursor,
     symbol: str,

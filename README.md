@@ -32,6 +32,30 @@ pip install -r requirements.txt
 
 ## Запуск
 
+**Одноразовая догрузка БД до текущей даты** (если БД давно не обновлялась):
+
+```bash
+python catch_up_db.py
+```
+
+Скрипт догружает пропущенные свечи от последней в БД до «сейчас» по всем ТФ из `TIMEFRAMES_DB` и выводит дату последней свечи (ТФ D и 60). Для постоянного обновления используй `main.py` или `accumulate_db.py`.
+
+**Полное обновление БД** — удалить файл БД и заново загрузить все таймфреймы из `TIMEFRAMES_DB` с биржи (актуальные данные, один масштаб):
+
+```bash
+python refresh_db.py
+```
+
+Скрипт запросит подтверждение, затем удалит `data/klines.db` и загрузит историю по каждому ТФ из `.env` (TIMEFRAMES_DB). Перед запуском останови бота (`main.py`, `telegram_bot.py`). Без подтверждения: `python refresh_db.py --yes`. Если `python` не в PATH: `py -3 refresh_db.py` или полный путь к интерпретатору.
+
+**Перезалив только дневного ТФ (D)** — если в БД по ТФ D попали некорректные цены (например миллионы вместо десятков тысяч):
+
+```bash
+python refill_tf_d.py
+```
+
+Скрипт удаляет все свечи по выбранной паре и ТФ D, затем загружает историю заново с Bybit (с фильтром нереалистичных цен).
+
 **Накопление базы для обучения** (фьючерс BTC, все таймфреймы):
 
 ```bash
@@ -46,7 +70,7 @@ python accumulate_db.py
 python main.py
 ```
 
-При заданном в `.env` токене `TELEGRAM_BOT_TOKEN` Telegram-бот запускается из `main.py` в отдельном потоке (общее соединение с БД). Для работы только сигнального бота оставь `TELEGRAM_BOT_TOKEN` пустым.
+При старте БД сразу догружается до текущей даты (первый тик), далее обновляется каждые `DB_UPDATE_INTERVAL_SEC` секунд. При заданном в `.env` токене `TELEGRAM_BOT_TOKEN` Telegram-бот запускается из `main.py` в отдельном потоке (общее соединение с БД). Для работы только сигнального бота оставь `TELEGRAM_BOT_TOKEN` пустым.
 
 **Управление через Telegram** (отдельный процесс, если не используешь запуск из main):
 
@@ -56,7 +80,7 @@ python telegram_bot.py
 
 Если `python` не в PATH — выполни `d:\python3.12.9\python.exe telegram_bot.py` из папки проекта.
 
-Нужен токен от [@BotFather](https://t.me/BotFather): создай бота, вставь токен в `.env` как `TELEGRAM_BOT_TOKEN`. Команды: `/start`, `/signal` — полный разбор и фазы по ТФ, `/status` — краткий статус одной строкой, `/db` — статистика БД, `/id` — твой user id для TELEGRAM_ALLOWED_IDS, `/help`. Под ответами — кнопки «Обновить» и переключение Сигнал/БД. Ограничение доступа: `TELEGRAM_ALLOWED_IDS=123,456` в `.env`.
+Нужен токен от [@BotFather](https://t.me/BotFather): создай бота, вставь токен в `.env` как `TELEGRAM_BOT_TOKEN`. Команды: `/start`, `/signal` — полный разбор и фазы по ТФ, `/status` — краткий статус одной строкой, `/db` — статистика БД, `/backtest_phases` — график бэктеста фаз, `/chart` — свечной график с трендами Вверх/Вниз/Флэт (из БД, ТФ D), `/id` — твой user id для TELEGRAM_ALLOWED_IDS, `/help`. Под ответами — кнопки «Обновить» и переключение Сигнал/БД. Ограничение доступа: `TELEGRAM_ALLOWED_IDS=123,456` в `.env`.
 
 ## База данных для обучения
 
@@ -131,6 +155,7 @@ best_bot_in_the_world/
 ├── backtest_trend.py       # Бэктест тренда: python backtest_trend.py [--tf 60]
 ├── compare_phase_methods.py # Сравнение методов фаз: python compare_phase_methods.py
 ├── full_backfill.py        # python full_backfill.py [--clear] [--extend]
+├── refresh_db.py           # Удалить БД и загрузить все ТФ заново: python refresh_db.py [--yes]
 ├── test_run_once.py        # python test_run_once.py
 ├── check_all.py            # Проверка окружения: python check_all.py [--quick] [-v]
 ├── release.py              # Версии и push: python release.py 1.0.0

@@ -90,6 +90,73 @@ def _run_one(
     return returns_by_phase, stats
 
 
+def run_for_chart(
+    symbol: str | None = None,
+    timeframe: str = "60",
+    max_bars: int | None = None,
+    lookback: int = 100,
+    forward_bars: int = 20,
+    step: int = 5,
+    threshold_up: float = 0.005,
+    threshold_down: float = -0.005,
+    phase_overrides: dict[str, Any] | None = None,
+    min_score: float = 0.0,
+) -> dict[str, Any] | None:
+    """
+    Запуск бэктеста фаз и возврат данных для визуализации (график в Telegram и т.п.).
+
+    max_bars: если None — используются все свечи по паре и таймфрейму из БД (весь период).
+    Возвращает dict: stats (total_accuracy, bull_ok, bull_total, bear_ok, bear_total, symbol, timeframe),
+    phase_summary (список по фазам: phase, name_ru, count, mean_ret, pct_positive, pct_up, pct_down).
+    При ошибке или недостатке данных возвращает None.
+    """
+    symbol = symbol or config.SYMBOL
+    conn = get_connection()
+    cur = conn.cursor()
+    candles = get_candles(cur, symbol, timeframe, limit=max_bars, order_asc=False)
+    conn.close()
+
+    if len(candles) < lookback + forward_bars:
+        return None
+
+    returns_by_phase, stats = _run_one(
+        candles, symbol, timeframe, lookback, forward_bars, step,
+        threshold_up, threshold_down, phase_overrides, min_score=min_score,
+    )
+    min_score_used = stats.get("min_score", 0.0)
+
+    def _filter(lst: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        return [(r, s) for r, s in lst if s >= min_score_used]
+
+    phase_summary: list[dict[str, Any]] = []
+    for phase in sorted(returns_by_phase.keys(), key=lambda p: (p not in BULLISH_PHASES and p not in BEARISH_PHASES, p)):
+        lst = _filter(returns_by_phase[phase])
+        if not lst:
+            continue
+        rets = [r for r, _ in lst]
+        mean_ret = sum(rets) / len(rets)
+        pct_up = sum(1 for r in rets if r >= threshold_up) / len(rets) * 100
+        pct_down = sum(1 for r in rets if r <= threshold_down) / len(rets) * 100
+        pct_positive = sum(1 for r in rets if r > 0) / len(rets) * 100
+        phase_summary.append({
+            "phase": phase,
+            "name_ru": PHASE_NAMES_RU.get(phase, phase),
+            "count": len(lst),
+            "mean_ret": mean_ret,
+            "pct_positive": pct_positive,
+            "pct_up": pct_up,
+            "pct_down": pct_down,
+        })
+
+    return {
+        "stats": stats,
+        "phase_summary": phase_summary,
+        "threshold_up": threshold_up,
+        "threshold_down": threshold_down,
+        "bars_used": len(candles),
+    }
+
+
 def run(
     symbol: str | None = None,
     timeframe: str = "60",
