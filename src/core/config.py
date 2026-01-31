@@ -99,6 +99,10 @@ class _Settings(BaseSettings):
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_ALLOWED_IDS: str = ""
+    TELEGRAM_ALERT_CHAT_ID: str = ""
+    TELEGRAM_ALERT_ON_SIGNAL_CHANGE: bool = False
+    TELEGRAM_ALERT_INTERVAL_SEC: float = 90.0
+    TELEGRAM_ALERT_MIN_CONFIDENCE: float = 0.0
 
     @field_validator("LOG_LEVEL", "LOG_LEVEL_FILE", mode="before")
     @classmethod
@@ -163,6 +167,11 @@ LOG_BACKUP_COUNT = _settings.LOG_BACKUP_COUNT
 LOG_SIGNALS_FILE = _settings.LOG_SIGNALS_FILE
 TELEGRAM_BOT_TOKEN = _settings.TELEGRAM_BOT_TOKEN.strip()
 TELEGRAM_ALLOWED_IDS = _parse_allowed_ids(_settings.TELEGRAM_ALLOWED_IDS)
+_alert_chat = (_settings.TELEGRAM_ALERT_CHAT_ID or "").strip()
+TELEGRAM_ALERT_CHAT_ID: int | None = int(_alert_chat) if _alert_chat.isdigit() else None
+TELEGRAM_ALERT_ON_SIGNAL_CHANGE = _settings.TELEGRAM_ALERT_ON_SIGNAL_CHANGE
+TELEGRAM_ALERT_INTERVAL_SEC = _settings.TELEGRAM_ALERT_INTERVAL_SEC or 90.0
+TELEGRAM_ALERT_MIN_CONFIDENCE = _settings.TELEGRAM_ALERT_MIN_CONFIDENCE or 0.0
 
 
 def validate_config() -> list[str]:

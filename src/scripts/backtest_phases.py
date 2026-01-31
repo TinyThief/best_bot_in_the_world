@@ -5,9 +5,10 @@
 смотрит форвард-доходность и считает точность по направлению (бычьи/медвежьи).
 Капитуляция трактуется как «ожидаем отскок» (бычья).
 
-Опция --tune: перебор порогов (vol_spike, drop_threshold, range_position) и вывод лучшей комбинации.
+Опция --tune: перебор порогов (vol_spike, drop_threshold, range_position) и min_score; вывод лучшей комбинации.
+Опция --sweep-min-score: таблица точности по разным --min-score (0, 0.5, 0.55, 0.6, 0.65, 0.7).
 
-Запуск: python backtest_phases.py [--tf 60] [--bars 20000]; с подбором: python backtest_phases.py --tune --tf 60 --bars 10000
+Запуск: python backtest_phases.py [--tf 60] [--bars 20000]; с подбором: python backtest_phases.py --tune --tf 60 --bars 10000; таблица по min-score: python backtest_phases.py --sweep-min-score --tf 60
 """
 from __future__ import annotations
 
@@ -241,6 +242,10 @@ def run(
     print("Готово.")
 
 
+# Значения min_score для перебора при --tune и --sweep-min-score
+MIN_SCORE_SWEEP = (0.0, 0.5, 0.55, 0.6, 0.65, 0.7)
+
+
 def _tune(
     symbol: str,
     timeframe: str,
@@ -251,7 +256,7 @@ def _tune(
     threshold_up: float,
     threshold_down: float,
 ) -> None:
-    """Перебор порогов и вывод лучшей комбинации."""
+    """Перебор порогов и min_score; вывод лучшей комбинации (пороги + min_score)."""
     conn = get_connection()
     cur = conn.cursor()
     candles = get_candles(cur, symbol, timeframe, limit=max_bars, order_asc=False)
@@ -260,9 +265,10 @@ def _tune(
         print(f"Мало свечей: {len(candles)}", file=sys.stderr)
         return
 
+    # Сетка порогов: 2×2×2×2 = 16 комбинаций × 7 min_score ≈ 112 прогонов (укладывается в 1–2 мин)
     grid = {
-        "vol_spike": [1.5, 1.8, 2.0, 2.2],
-        "drop_threshold": [-0.07, -0.05, -0.04, -0.03],
+        "vol_spike": [1.8, 2.0],
+        "drop_threshold": [-0.05, -0.04],
         "range_position_low": [0.30, 0.35],
         "range_position_high": [0.65, 0.70],
     }
@@ -270,31 +276,93 @@ def _tune(
     values = list(grid.values())
     best_acc = -1.0
     best_combo: dict[str, Any] = {}
+    best_min_score = 0.0
     best_stats: dict[str, Any] = {}
 
     for combo in itertools.product(*values):
         overrides = dict(zip(keys, combo))
-        _, stats = _run_one(
-            candles, symbol, timeframe, lookback, forward_bars, step,
-            threshold_up, threshold_down, overrides,
-        )
-        acc = stats["total_accuracy"]
-        if acc > best_acc:
-            best_acc = acc
-            best_combo = overrides
-            best_stats = stats
+        for min_score in MIN_SCORE_SWEEP:
+            _, stats = _run_one(
+                candles, symbol, timeframe, lookback, forward_bars, step,
+                threshold_up, threshold_down, overrides, min_score=min_score,
+            )
+            acc = stats["total_accuracy"]
+            total_n = stats.get("total_n", 0)
+            if total_n >= 50 and acc > best_acc:
+                best_acc = acc
+                best_combo = overrides.copy()
+                best_min_score = min_score
+                best_stats = stats
 
-    print("--- Подбор порогов (--tune) ---")
-    print(f"Пара: {symbol}, ТФ: {timeframe}, баров: {len(candles)}, оценок: {best_stats.get('total_n', 0)}")
-    print(f"Лучшая точность по направлению: {best_acc:.1%}")
-    print("Параметры:")
+    print("--- Подбор порогов и min_score (--tune) ---")
+    print(f"Пара: {symbol}, ТФ: {timeframe}, баров: {len(candles)}")
+    print(f"Лучшая точность по направлению: {best_acc:.1%} (оценок: {best_stats.get('total_n', 0)})")
+    print("Пороги (PHASE_PROFILES):")
     for k, v in best_combo.items():
         print(f"  {k}: {v}")
+    print(f"  min_score (фильтр): {best_min_score}")
     print()
-    print("Рекомендуется добавить в PHASE_PROFILES в market_phases.py для соответствующего ТФ.")
-    print("Полный отчёт с этими порогами: python backtest_phases.py --tf {} --vol-spike {} --drop-threshold {} --range-low {} --range-high {} --bars {} --step {}"
-          .format(timeframe, best_combo.get("vol_spike"), best_combo.get("drop_threshold"),
-                  best_combo.get("range_position_low"), best_combo.get("range_position_high"), max_bars, step))
+    print("Рекомендации:")
+    print("  1. Добавь пороги в PHASE_PROFILES в market_phases.py для соответствующего ТФ.")
+    print("  2. В .env задай PHASE_SCORE_MIN={} (или оставь текущее).".format(best_min_score))
+    print("Полный отчёт: python bin/backtest_phases.py --tf {} --vol-spike {} --drop-threshold {} --range-low {} --range-high {} --min-score {} --bars {} --step {}"
+          .format(
+              timeframe,
+              best_combo.get("vol_spike"),
+              best_combo.get("drop_threshold"),
+              best_combo.get("range_position_low"),
+              best_combo.get("range_position_high"),
+              best_min_score,
+              max_bars,
+              step,
+          ))
+
+
+def _sweep_min_score(
+    symbol: str,
+    timeframe: str,
+    max_bars: int,
+    lookback: int,
+    forward_bars: int,
+    step: int,
+    threshold_up: float,
+    threshold_down: float,
+    phase_overrides: dict[str, Any] | None = None,
+) -> None:
+    """Таблица точности по разным min_score (0, 0.5, 0.55, 0.6, 0.65, 0.7)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    candles = get_candles(cur, symbol, timeframe, limit=max_bars, order_asc=False)
+    conn.close()
+    if len(candles) < lookback + forward_bars:
+        print(f"Мало свечей: {len(candles)}", file=sys.stderr)
+        return
+
+    rows: list[tuple[float, float, int, int, int, int, int]] = []
+    for min_score in MIN_SCORE_SWEEP:
+        _, stats = _run_one(
+            candles, symbol, timeframe, lookback, forward_bars, step,
+            threshold_up, threshold_down, phase_overrides, min_score=min_score,
+        )
+        acc = stats["total_accuracy"]
+        total_n = stats["total_n"]
+        bull_ok, bull_total = stats["bull_ok"], stats["bull_total"]
+        bear_ok, bear_total = stats["bear_ok"], stats["bear_total"]
+        rows.append((min_score, acc, total_n, bull_ok, bull_total, bear_ok, bear_total))
+
+    print("--- Таблица точности по min_score (--sweep-min-score) ---")
+    print(f"Пара: {symbol}, ТФ: {timeframe}, баров: {len(candles)}, lookback={lookback}, forward={forward_bars}, step={step}")
+    print()
+    print(f"  {'min_score':>8}  {'точность':>8}  {'оценок':>8}  {'бычьи ок/всего':>14}  {'медвежьи ок/всего':>18}")
+    print("  " + "-" * 60)
+    for min_score, acc, total_n, bull_ok, bull_total, bear_ok, bear_total in rows:
+        bull_str = f"{bull_ok}/{bull_total}" if bull_total else "—"
+        bear_str = f"{bear_ok}/{bear_total}" if bear_total else "—"
+        print(f"  {min_score:>8.2f}  {acc:>7.1%}  {total_n:>8}  {bull_str:>14}  {bear_str:>18}")
+    best_row = max(rows, key=lambda r: (r[1], r[2]))
+    print()
+    print(f"Лучшая точность: {best_row[1]:.1%} при min_score={best_row[0]}, оценок={best_row[2]}")
+    print("Рекомендация: задай PHASE_SCORE_MIN в .env или используй --min-score в бэктесте.")
 
 
 def main() -> None:
@@ -308,7 +376,8 @@ def main() -> None:
     parser.add_argument("--threshold-up", type=float, default=0.005, help="Порог «рост» (доля, по умолчанию 0.5%%)")
     parser.add_argument("--threshold-down", type=float, default=-0.005, help="Порог «падение» (доля, по умолчанию -0.5%%)")
     parser.add_argument("--min-score", type=float, default=0.0, help="Учитывать только оценки с score >= N (0 = без фильтра)")
-    parser.add_argument("--tune", action="store_true", help="Подбор порогов vol_spike, drop_threshold, range_position")
+    parser.add_argument("--tune", action="store_true", help="Подбор порогов и min_score; вывод лучшей комбинации")
+    parser.add_argument("--sweep-min-score", action="store_true", help="Таблица точности по min_score (0, 0.5, 0.55, 0.6, 0.65, 0.7)")
     parser.add_argument("--vol-spike", type=float, default=None, help="Переопределить vol_spike для detect_phase")
     parser.add_argument("--drop-threshold", type=float, default=None, help="Переопределить drop_threshold")
     parser.add_argument("--range-low", type=float, default=None, dest="range_position_low", help="Переопределить range_position_low")
@@ -336,6 +405,20 @@ def main() -> None:
             step=args.step,
             threshold_up=args.threshold_up,
             threshold_down=args.threshold_down,
+        )
+        return
+
+    if args.sweep_min_score:
+        _sweep_min_score(
+            symbol=symbol,
+            timeframe=args.timeframe,
+            max_bars=args.bars,
+            lookback=args.lookback,
+            forward_bars=args.forward,
+            step=args.step,
+            threshold_up=args.threshold_up,
+            threshold_down=args.threshold_down,
+            phase_overrides=phase_overrides if phase_overrides else None,
         )
         return
 

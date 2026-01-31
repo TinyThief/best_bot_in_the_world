@@ -10,6 +10,24 @@
 
 ---
 
+## [2.7.0] — 2026-01-31
+
+### Добавлено
+
+- **Параллельный расчёт по ТФ в multi_tf:** quality, trend, phase (без контекста), regime, momentum по каждому ТФ считаются в `ThreadPoolExecutor`; обновление истории устойчивости, контекст старшего ТФ, зоны и агрегация сигнала — последовательно. Документ: `docs/PARALLEL_MULTI_TF.md`.
+- **Торговые зоны (trading_zones.py):** свинг-пивоты, кластеризация уровней, переключение ролей (сопротивление ↔ поддержка после пробоя); volume_at_level, confluence по ТФ (один уровень на нескольких ТФ). Интеграция в multi_tf (зоны по старшему ТФ, levels_with_confluence). Документы: `docs/TRADING_ZONES_DESIGN.md`, `docs/TRADING_ZONES_PROP_UPGRADE.md`.
+- **Telegram-бот:** команды `/zones` (торговые зоны), `/momentum` (импульс по старшему ТФ), `/health` (свежесть БД по ТФ); обогащённый `/signal` (блоки «Зоны» и «Импульс», entry_score_breakdown); inline-кнопки **Сигнал | Зоны | Импульс** и Обновить | БД; алерт при смене сигнала (job по TELEGRAM_ALERT_INTERVAL_SEC, TELEGRAM_ALERT_CHAT_ID, TELEGRAM_ALERT_ON_SIGNAL_CHANGE). Конфиг: TELEGRAM_ALERT_CHAT_ID, TELEGRAM_ALERT_ON_SIGNAL_CHANGE, TELEGRAM_ALERT_INTERVAL_SEC, TELEGRAM_ALERT_MIN_CONFIDENCE. Документ: `docs/TELEGRAM_BOT_UPGRADE.md`.
+- **Импульс (market_trend):** detect_momentum — состояние (strong/fading/neutral), направление, RSI, return_5; в multi_tf и в логе/Telegram по старшему ТФ.
+- **Скрипт test_zones:** `bin/test_zones.py` — тест торговых зон по БД.
+
+### Изменено
+
+- **multi_tf:** расчёт по ТФ параллельный; в отчёте — trading_zones (zone_low/zone_high, nearest_support/resistance, recent_flips, levels_with_confluence), distance_to_support_pct/resistance_pct, higher_tf_momentum_*.
+- **bot_loop:** в лог добавлены торговые зоны (уровни, перевороты) и импульс по старшему ТФ.
+- **Документация:** AGENT_CONTEXT, README, ДЛЯ_КОМАНДЫ, STRUCTURE — актуализированы: trading_zones, parallel multi_tf, команды Telegram (/zones, /momentum, /health), inline-кнопки, алерт, TELEGRAM_ALERT_*.
+
+---
+
 ## [2.6.0] — 2026-01-30
 
 Структура bin/, конфиг на pydantic-settings, улучшения тренда, визуализация и тесты тренда, проверка скриптов в check_all.
@@ -187,7 +205,9 @@
 - Структура: `src/core`, `src/analysis`, `src/app`, `src/scripts`; лаунчеры в корне.
 - Конфиг через `.env`, проверка через `check_all.py`.
 
-[Unreleased]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.6.0...v2.7.0
+[2.6.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.5.0...v2.6.0
 [2.0.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v1.0.0...v2.0.0
 [2.1.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.0.0...v2.1.0
 [2.2.0]: https://github.com/TinyThief/best_bot_in_the_world/compare/v2.1.0...v2.2.0

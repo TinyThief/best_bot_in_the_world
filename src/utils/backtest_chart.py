@@ -3,6 +3,7 @@
 
 - build_phases_chart / build_trend_chart: столбчатые графики точности по фазам/направлениям.
 - build_candlestick_trend_chart: свечной график из БД с зонами трендов (Вверх / Вниз / Флэт) по detect_trend.
+- build_candlestick_phase_chart: свечной график с зонами 6 фаз рынка (Накопление, Рост, Распределение, Падение, Капитуляция, Восстановление) по detect_phase.
 Возвращает PNG в BytesIO для отправки фото в Telegram.
 """
 from __future__ import annotations
@@ -191,6 +192,78 @@ TREND_CHART_COLORS = {
 }
 
 TREND_NAMES_RU_CHART = {"up": "Вверх", "down": "Вниз", "flat": "Флэт"}
+
+# Цвета 6 фаз рынка на свечном графике (фон зон) — насыщенные, для чёткого перехода
+PHASE_CHART_COLORS = {
+    "accumulation": "#7f8c8d",   # тёмно-серый — накопление
+    "markup": "#27ae60",         # насыщенный зелёный — рост
+    "distribution": "#c0392b",   # насыщенный красный — распределение
+    "markdown": "#922b21",       # тёмно-красный — падение
+    "capitulation": "#6c3483",   # насыщенный фиолетовый — капитуляция
+    "recovery": "#1a5276",      # тёмно-синий — восстановление
+}
+# Прозрачность фона зон фаз (0.4 — хорошо виден переход, без перебивания свечей)
+PHASE_CHART_ALPHA = 0.40
+PHASE_NAMES_RU_CHART = {
+    "accumulation": "Накопление",
+    "markup": "Рост",
+    "distribution": "Распределение",
+    "markdown": "Падение",
+    "capitulation": "Капитуляция",
+    "recovery": "Восстановление",
+}
+
+
+def _compute_phase_ranges(
+    candles: list[dict[str, Any]],
+    lookback: int,
+    timeframe: str,
+) -> dict[str, list[tuple[int, int]]]:
+    """
+    Для каждого бара (начиная с lookback) считает фазу (detect_phase).
+    Возвращает phase_ranges: phase_id -> [(start_idx, end_idx), ...].
+    """
+    from ..analysis.market_phases import PHASES, detect_phase
+
+    n = len(candles)
+    phase_ranges: dict[str, list[tuple[int, int]]] = {p: [] for p in PHASES}
+
+    for i in range(lookback, n):
+        window = candles[i - lookback : i]
+        try:
+            res = detect_phase(window, timeframe=timeframe)
+            phase = res.get("phase", "accumulation")
+        except Exception:
+            phase = "accumulation"
+        if phase not in phase_ranges:
+            phase_ranges[phase] = []
+        r = phase_ranges[phase]
+        if r and r[-1][1] == i - 1:
+            r[-1] = (r[-1][0], i)
+        else:
+            r.append((i, i))
+
+    return phase_ranges
+
+
+def _shift_phase_ranges(
+    phase_ranges: dict[str, list[tuple[int, int]]],
+    offset: int,
+    length: int,
+) -> dict[str, list[tuple[int, int]]]:
+    """Сдвигает индексы диапазонов фаз на -offset и обрезает по [0, length)."""
+    from ..analysis.market_phases import PHASES
+
+    out: dict[str, list[tuple[int, int]]] = {p: [] for p in PHASES}
+    for phase, ranges in phase_ranges.items():
+        if phase not in out:
+            out[phase] = []
+        for i0, i1 in ranges:
+            j0 = max(0, i0 - offset)
+            j1 = min(length, i1 - offset)
+            if j0 < j1:
+                out[phase].append((j0, j1))
+    return out
 
 
 def _compute_trend_ranges(
@@ -394,6 +467,186 @@ def build_daily_trend_full_chart(
 
     title_n = f"последние {n} из {n_full} свечей (тренд по всей БД)" if n_full > n else f"{n} свечей, тренд по всей БД"
     ax.set_title(f"{symbol}  |  ТФ {timeframe}  |  {title_n}  |  Вверх / Вниз / Флэт")
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def build_candlestick_phase_chart(
+    candles: list[dict[str, Any]],
+    symbol: str,
+    timeframe: str,
+    *,
+    lookback: int = 100,
+    max_candles_display: int = 730,
+    dpi: int = 120,
+    figsize: tuple[float, float] = (14, 7),
+) -> io.BytesIO:
+    """
+    Свечной график с зонами 6 фаз рынка (Накопление, Рост, Распределение, Падение, Капитуляция, Восстановление).
+
+    candles: список dict с start_time, open, high, low, close, volume (от старых к новым).
+    symbol, timeframe — для заголовка и расчёта фаз (detect_phase).
+    lookback: окно для detect_phase.
+    max_candles_display: сколько последних свечей рисовать (по умолчанию 730 ≈ 2 года на ТФ D).
+    Возвращает BytesIO с PNG (для send_photo в Telegram).
+    """
+    from ..analysis.market_phases import PHASES
+
+    min_candles = lookback + 1
+    if not candles or len(candles) < min_candles:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        ax.text(0.5, 0.5, "Недостаточно свечей для графика фаз (нужно минимум %s)" % min_candles, ha="center", va="center", fontsize=14)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    # Фильтр цен (BTC 1k–150k, макс. 30% диапазон)
+    if "BTC" in symbol.upper():
+        price_lo, price_hi = 1_000.0, 150_000.0
+        max_range_ratio = 0.30
+        filtered = []
+        for c in candles:
+            o = float(c.get("open", 0) or 0)
+            h = float(c.get("high", 0) or 0)
+            l_ = float(c.get("low", 0) or 0)
+            cl = float(c.get("close", 0) or 0)
+            if o <= 0:
+                continue
+            mn, mx = min(o, h, l_, cl), max(o, h, l_, cl)
+            if mn < price_lo or mx > price_hi:
+                continue
+            if (h - l_) / o > max_range_ratio:
+                continue
+            filtered.append(c)
+        if len(filtered) >= min_candles:
+            candles = filtered
+
+    n_full = len(candles)
+    phase_ranges_full = _compute_phase_ranges(candles, lookback, timeframe)
+    display_n = min(n_full, max_candles_display)
+    display_candles = candles[-display_n:]
+    offset = n_full - display_n
+    phase_ranges = _shift_phase_ranges(phase_ranges_full, offset, display_n) if offset > 0 else phase_ranges_full
+    n = len(display_candles)
+
+    # Первые (lookback - 1) баров не имеют фазы — считаем только с полного окна. Растягиваем первую вычисленную фазу влево, чтобы левая часть графика (сентябрь–декабрь и т.п.) тоже была закрашена.
+    all_starts = [i0 for phase in PHASES for (i0, i1) in phase_ranges.get(phase, [])]
+    min_start = min(all_starts) if all_starts else n
+    if min_start > 0:
+        # Найти фазу, у которой есть отрезок, начинающийся с min_start; продлить его до 0
+        for phase in PHASES:
+            for j, (i0, i1) in enumerate(phase_ranges.get(phase, [])):
+                if i0 == min_start:
+                    phase_ranges.setdefault(phase, []).insert(0, (0, min_start))
+                    break
+            else:
+                continue
+            break
+
+    opens = np.array([c["open"] for c in display_candles], dtype=float)
+    highs = np.array([c["high"] for c in display_candles], dtype=float)
+    lows = np.array([c["low"] for c in display_candles], dtype=float)
+    closes = np.array([c["close"] for c in display_candles], dtype=float)
+
+    fig_w = min(28.0, max(figsize[0], 12.0 + n * 0.012))
+    fig_h = figsize[1]
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+    ax.set_facecolor("white")
+    fig.patch.set_facecolor("white")
+    ax.grid(True, alpha=0.3, linestyle="-")
+    ax.set_axisbelow(True)
+
+    y_min_glob = float(min(lows.min(), opens.min(), closes.min()))
+    y_max_glob = float(max(highs.max(), opens.max(), closes.max()))
+
+    # Фоновые зоны фаз (порядок: accumulation, markup, distribution, markdown, capitulation, recovery)
+    for phase in PHASES:
+        color = PHASE_CHART_COLORS.get(phase, "#95a5a6")
+        for (i0, i1) in phase_ranges.get(phase, []):
+            ax.axvspan(i0 - 0.5, i1 + 0.5, facecolor=color, alpha=PHASE_CHART_ALPHA)
+
+    min_body_height = (y_max_glob - y_min_glob) * 0.0005
+    width = min(0.85, 0.5 + 300.0 / max(n, 1))
+    wick_lw = 1.0
+    for i in range(n):
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        color = CANDLE_COLOR_UP if c >= o else CANDLE_COLOR_DOWN
+        body_bottom = min(o, c)
+        body_top_real = max(o, c)
+        body_height_real = body_top_real - body_bottom
+        body_height_draw = max(body_height_real, min_body_height)
+        body_top_draw = body_bottom + body_height_draw
+        if l < body_bottom - 1e-9:
+            ax.plot([i, i], [l, body_bottom], color=color, linewidth=wick_lw, solid_capstyle="round")
+        if h > body_top_draw + 1e-9:
+            ax.plot([i, i], [body_top_draw, h], color=color, linewidth=wick_lw, solid_capstyle="round")
+        rect = plt.Rectangle(
+            (i - width / 2, body_bottom),
+            width,
+            body_height_draw,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.6,
+        )
+        ax.add_patch(rect)
+
+    ax.set_xlim(-0.5, n - 0.5)
+    ax.set_ylim(y_min_glob - (y_max_glob - y_min_glob) * 0.01, y_max_glob + (y_max_glob - y_min_glob) * 0.01)
+    ax.set_ylabel("Цена (USDT)")
+    ax.set_xlabel("Дата")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f}"))
+
+    step_ticks = max(1, n // 12)
+    tick_indices = list(range(0, n, step_ticks))
+    if n - 1 not in tick_indices:
+        tick_indices.append(n - 1)
+    ax.set_xticks(tick_indices)
+    ax.set_xticklabels(
+        [
+            datetime.utcfromtimestamp(display_candles[i]["start_time"] / 1000).strftime("%b %Y")
+            if display_candles[i]["start_time"] > 1e10
+            else datetime.utcfromtimestamp(display_candles[i]["start_time"]).strftime("%b %Y")
+            for i in tick_indices
+        ],
+        rotation=25,
+        ha="right",
+    )
+
+    last_ts = display_candles[-1]["start_time"]
+    last_ts_sec = last_ts / 1000 if last_ts > 1e10 else last_ts
+    last_date_str = datetime.utcfromtimestamp(last_ts_sec).strftime("%d.%m.%Y")
+    o, h, l, c = float(opens[-1]), float(highs[-1]), float(lows[-1]), float(closes[-1])
+    change = c - o
+    change_pct = (change / o * 100) if o and o != 0 else 0
+    # Инфобокс — в нижнем левом углу, чтобы не перекрывать легенду (она справа сверху)
+    text_box = (
+        f"Последняя свеча: {last_date_str}\n"
+        f"ОТКР {o:,.1f}  МАКС {h:,.1f}\nМИН {l:,.1f}  ЗАКР {c:,.1f}\n"
+        f"Change {change:+,.1f} ({change_pct:+.2f}%)\n"
+        f"Диапазон: {y_min_glob:,.0f} – {y_max_glob:,.0f}"
+    )
+    ax.text(
+        0.02, 0.02, text_box,
+        transform=ax.transAxes, fontsize=8, verticalalignment="bottom",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.92), family="monospace",
+    )
+
+    # Легенда фаз — справа сверху (не накладывается на инфобокс)
+    legend_handles = [
+        mpatches.Patch(color=PHASE_CHART_COLORS.get(p, "#95a5a6"), alpha=PHASE_CHART_ALPHA, label=PHASE_NAMES_RU_CHART.get(p, p))
+        for p in PHASES
+    ]
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=8, ncol=2, framealpha=0.95)
+
+    title_n = f"последние {n} из {n_full} свечей" if n_full > n else f"{n} свечей"
+    ax.set_title(f"{symbol}  |  ТФ {timeframe}  |  {title_n}  |  6 фаз рынка")
     plt.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)

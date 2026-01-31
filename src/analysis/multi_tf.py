@@ -2,18 +2,21 @@
 Мультитаймфреймовый анализ: агрегация сигналов с нескольких таймфреймов.
 Тренд на старшем ТФ + 6 фаз рынка (накопление, рост, распределение, падение, капитуляция, восстановление).
 Источник свечей: DATA_SOURCE=db — из БД (по умолчанию), =exchange — запрос к Bybit на каждый тик.
+Расчёт по каждому ТФ (quality, trend, phase, regime, momentum) выполняется параллельно.
 """
 from __future__ import annotations
 
 import logging
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from ..core import config
 from ..core.exchange import get_klines_multi_timeframe
 from ..utils.candle_quality import validate_candles as validate_candles_quality
 from .market_phases import BEARISH_PHASES, BULLISH_PHASES, _atr, _volume_ratio, detect_phase, swing_levels
-from .market_trend import detect_regime, detect_trend
+from .market_trend import detect_momentum, detect_regime, detect_trend
+from .trading_zones import detect_trading_zones
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,76 @@ def _update_trend_stability(tf: str, trend: str) -> tuple[float, bool]:
     same = sum(1 for t in hist if t == trend)
     stability = same / len(hist)
     return round(stability, 3), stability >= stability_min
+
+
+def _analyze_single_timeframe(tf: str, candles_raw: list[dict[str, Any]]) -> tuple[str, list, dict, dict, dict, dict, dict]:
+    """
+    Независимый расчёт по одному ТФ: quality, trend, phase (без контекста старшего), regime, momentum.
+    Возвращает (tf, candles, quality_result, trend_info, phase_info, regime_info, momentum_info).
+    Не обновляет _phase_history / _trend_history — это делается последовательно после сбора.
+    """
+    default_quality = {
+        "valid": False,
+        "filtered": [],
+        "issues": [],
+        "quality_score": 0.0,
+        "invalid_count": 0,
+        "total_count": 0,
+    }
+    default_phase = {
+        "phase": "accumulation",
+        "phase_ru": "—",
+        "score": 0.0,
+        "details": {},
+        "secondary_phase": None,
+        "secondary_phase_ru": None,
+        "secondary_score": 0.0,
+        "score_gap": 0.0,
+        "phase_unclear": True,
+    }
+    default_regime = {
+        "regime": "range",
+        "regime_ru": "Диапазон",
+        "adx": None,
+        "atr_ratio": None,
+        "bb_width": None,
+    }
+    default_momentum = {
+        "momentum_state": "neutral",
+        "momentum_state_ru": "Нейтральный",
+        "momentum_direction": "neutral",
+        "momentum_direction_ru": "Нейтральный",
+        "rsi": None,
+        "return_5": None,
+        "details": {},
+    }
+    quality_result = (
+        validate_candles_quality(candles_raw, timeframe=tf)
+        if candles_raw
+        else default_quality
+    )
+    candles = quality_result.get("filtered") or candles_raw or []
+    trend_info = (
+        detect_trend(candles, timeframe=tf)
+        if candles and len(candles) >= 30
+        else _default_trend_info.copy()
+    )
+    phase_info = (
+        detect_phase(candles, timeframe=tf)
+        if candles and len(candles) >= 30
+        else default_phase.copy()
+    )
+    regime_info = (
+        detect_regime(candles, lookback=50)
+        if candles and len(candles) >= 30
+        else default_regime.copy()
+    )
+    momentum_info = (
+        detect_momentum(candles)
+        if candles and len(candles) >= 20
+        else default_momentum.copy()
+    )
+    return (tf, candles, quality_result, trend_info, phase_info, regime_info, momentum_info)
 
 
 def _load_candles_from_db(
@@ -128,45 +201,36 @@ def analyze_multi_timeframe(
     sorted_tfs = sorted(intervals, key=_tf_sort_key)
     higher_tf = sorted_tfs[-1] if sorted_tfs else None
 
+    # Параллельный расчёт по каждому ТФ (quality, trend, phase без контекста, regime, momentum)
+    results_by_tf: dict[str, tuple] = {}
+    max_workers = min(len(sorted_tfs), 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_tf = {
+            executor.submit(_analyze_single_timeframe, tf, data.get(tf) or []): tf
+            for tf in sorted_tfs
+        }
+        for future in as_completed(future_to_tf):
+            tf = future_to_tf[future]
+            try:
+                result = future.result()
+                results_by_tf[tf] = result
+            except Exception as e:
+                logger.warning("Параллельный расчёт ТФ %s: %s", tf, e)
+                results_by_tf[tf] = _analyze_single_timeframe(tf, data.get(tf) or [])
+
+    # Последовательно: обновление истории устойчивости и сборка timeframes_report (порядок по sorted_tfs)
     timeframes_report: dict[str, dict[str, Any]] = {}
-    _default_phase_info = {
-        "phase": "accumulation",
-        "phase_ru": "—",
-        "score": 0.0,
-        "details": {},
-        "secondary_phase": None,
-        "secondary_phase_ru": None,
-        "secondary_score": 0.0,
-        "score_gap": 0.0,
-        "phase_unclear": True,
-    }
     candle_quality_min = getattr(config, "CANDLE_QUALITY_MIN_SCORE", 0.0)
     for tf in sorted_tfs:
-        candles_raw = data.get(tf) or []
-        quality_result = validate_candles_quality(candles_raw, timeframe=tf) if candles_raw else {
-            "valid": False, "filtered": [], "issues": [], "quality_score": 0.0, "invalid_count": 0, "total_count": 0,
-        }
-        candles = quality_result.get("filtered") or candles_raw  # для анализа всегда используем очищенные данные
+        r = results_by_tf.get(tf)
+        if r is None:
+            continue
+        _t, candles, quality_result, trend_info, phase_info, regime_info, momentum_info = r
+        phase_stability, phase_stable = _update_phase_stability(tf, phase_info["phase"])
+        trend_stability, trend_stable = _update_trend_stability(tf, trend_info["direction"])
         candle_quality_ok = (
             candle_quality_min <= 0
             or (quality_result.get("quality_score", 0) >= candle_quality_min and quality_result.get("valid", False))
-        )
-        trend_info = (
-            detect_trend(candles, timeframe=tf)
-            if candles and len(candles) >= 30
-            else _default_trend_info.copy()
-        )
-        phase_info = (
-            detect_phase(candles, timeframe=tf)
-            if candles and len(candles) >= 30
-            else _default_phase_info.copy()
-        )
-        phase_stability, phase_stable = _update_phase_stability(tf, phase_info["phase"])
-        trend_stability, trend_stable = _update_trend_stability(tf, trend_info["direction"])
-        regime_info = (
-            detect_regime(candles, lookback=50)
-            if candles and len(candles) >= 30
-            else {"regime": "range", "regime_ru": "Диапазон", "adx": None, "atr_ratio": None, "bb_width": None}
         )
         timeframes_report[tf] = {
             "candles": candles,
@@ -204,6 +268,12 @@ def analyze_multi_timeframe(
             "phase_unclear": phase_info.get("phase_unclear", True),
             "phase_stability": phase_stability,
             "phase_stable": phase_stable,
+            "momentum_state": momentum_info.get("momentum_state", "neutral"),
+            "momentum_state_ru": momentum_info.get("momentum_state_ru", "Нейтральный"),
+            "momentum_direction": momentum_info.get("momentum_direction", "neutral"),
+            "momentum_direction_ru": momentum_info.get("momentum_direction_ru", "Нейтральный"),
+            "momentum_rsi": momentum_info.get("rsi"),
+            "momentum_return_5": momentum_info.get("return_5"),
         }
 
     # Контекст старшего ТФ для младших: пересчёт фаз с higher_tf_phase / higher_tf_trend
@@ -245,8 +315,43 @@ def analyze_multi_timeframe(
     atr_ok = atr_max_ratio <= 0 or (atr_ratio is not None and atr_ratio <= atr_max_ratio)
     # Уровни по свинг-точкам (HH/HL): поддержка и сопротивление, расстояние цены до них
     levels = swing_levels(higher_tf_candles, pivots=5) if len(higher_tf_candles) >= 10 else {}
-    dist_support = levels.get("distance_to_support_pct")
-    dist_resistance = levels.get("distance_to_resistance_pct")
+    # Торговые зоны (динамические уровни с переключением ролей: сопротивление → поддержка и наоборот)
+    trading_zones = (
+        detect_trading_zones(higher_tf_candles)
+        if len(higher_tf_candles) >= 15
+        else {"levels": [], "nearest_support": None, "nearest_resistance": None, "zone_low": None, "zone_high": None, "in_zone": False, "at_support_zone": False, "at_resistance_zone": False, "recent_flips": [], "distance_to_support_pct": None, "distance_to_resistance_pct": None}
+    )
+    # Конfluence зон по ТФ: один уровень на нескольких ТФ — сильнее
+    _confluence_threshold_pct = 0.002
+    if trading_zones.get("levels") and len(sorted_tfs) > 1:
+        for lev in trading_zones["levels"]:
+            lev["confluence_tfs"] = [higher_tf]
+        for _tf in sorted_tfs:
+            if _tf == higher_tf:
+                continue
+            _candles = (timeframes_report.get(_tf) or {}).get("candles") or []
+            if len(_candles) < 15:
+                continue
+            _z = detect_trading_zones(_candles, max_levels=8)
+            _other_prices = [lev["price"] for lev in (_z.get("levels") or [])]
+            for lev in trading_zones["levels"]:
+                p = lev.get("price")
+                if p is None or p <= 0:
+                    continue
+                for _op in _other_prices:
+                    if abs(_op - p) / p <= _confluence_threshold_pct:
+                        if _tf not in lev["confluence_tfs"]:
+                            lev["confluence_tfs"].append(_tf)
+                        break
+        levels_with_confluence = sum(1 for lev in trading_zones.get("levels") or [] if len(lev.get("confluence_tfs") or []) >= 2)
+    else:
+        levels_with_confluence = 0
+        for lev in trading_zones.get("levels") or []:
+            lev["confluence_tfs"] = [higher_tf] if higher_tf else []
+    trading_zones["levels_with_confluence"] = levels_with_confluence
+    # Расстояния до уровней: приоритет у зон (если есть), иначе свинг-уровни
+    dist_support = trading_zones.get("distance_to_support_pct") if trading_zones.get("levels") else levels.get("distance_to_support_pct")
+    dist_resistance = trading_zones.get("distance_to_resistance_pct") if trading_zones.get("levels") else levels.get("distance_to_resistance_pct")
     level_max = getattr(config, "LEVEL_MAX_DISTANCE_PCT", 0.0)
     level_ok = (
         level_max <= 0
@@ -427,6 +532,7 @@ def analyze_multi_timeframe(
         "distance_to_support_pct": dist_support,
         "distance_to_resistance_pct": dist_resistance,
         "level_ok": level_ok,
+        "trading_zones": trading_zones,
         "higher_tf_rsi_bull_div": (higher_tf_data.get("phase_details") or {}).get("rsi_bullish_divergence", False),
         "higher_tf_rsi_bear_div": (higher_tf_data.get("phase_details") or {}).get("rsi_bearish_divergence", False),
         "tf_align_count": tf_align_count,
@@ -440,6 +546,12 @@ def analyze_multi_timeframe(
         "higher_tf_regime_adx": higher_tf_data.get("regime_adx"),
         "higher_tf_regime_atr_ratio": higher_tf_data.get("regime_atr_ratio"),
         "regime_ok": regime_ok,
+        "higher_tf_momentum_state": higher_tf_data.get("momentum_state", "neutral"),
+        "higher_tf_momentum_state_ru": higher_tf_data.get("momentum_state_ru", "Нейтральный"),
+        "higher_tf_momentum_direction": higher_tf_data.get("momentum_direction", "neutral"),
+        "higher_tf_momentum_direction_ru": higher_tf_data.get("momentum_direction_ru", "Нейтральный"),
+        "higher_tf_momentum_rsi": higher_tf_data.get("momentum_rsi"),
+        "higher_tf_momentum_return_5": higher_tf_data.get("momentum_return_5"),
     }
 
 

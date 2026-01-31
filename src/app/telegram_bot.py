@@ -1,7 +1,7 @@
 """
 Управление ботом через Telegram.
-Команды: /start, /help, /signal, /status, /db, /backtest_phases, /chart, /trend_daily, /id.
-Reply-панель + inline-кнопки под сообщениями (Сигнал | БД | Обновить).
+Команды: /start, /help, /signal, /status, /zones, /momentum, /db, /health, /backtest_phases, /chart, /phases, /trend_daily, /id.
+Reply-панель + inline-кнопки: Сигнал | Зоны | Импульс | Обновить | БД. Алерт при смене сигнала (TELEGRAM_ALERT_*).
 Запуск: python telegram_bot.py (launcher в корне).
 """
 from __future__ import annotations
@@ -36,15 +36,29 @@ logger = logging.getLogger(__name__)
 # Эмодзи по направлению сигнала
 DIR_EMOJI = {"long": "🟢 Long", "short": "🔴 Short", "none": "⚪ None"}
 
-HELP_TEXT = """Команды:
-/signal — полный разбор: сигнал и фазы по таймфреймам
-/status — одна строка: сигнал и старший таймфрейм
+HELP_TEXT = """<b>Сигнал и фазы</b>
+/signal — полный разбор: сигнал, фазы по ТФ, зоны, импульс
+/status — одна строка: сигнал и старший ТФ
+
+<b>Зоны и импульс</b>
+/zones — торговые зоны: поддержка/сопротивление, перевороты, confluence
+/momentum — импульс: состояние (сильный/затухающий), RSI, направление
+
+<b>Графики</b>
+/chart — свечной график с трендами Вверх/Вниз/Флэт
+/phases — график 6 фаз рынка (Накопление, Рост, Распределение…)
+/trend_daily — тренд по всей БД ТФ D (до 2000 свечей)
+/backtest_phases — график бэктеста фаз
+
+<b>БД и мониторинг</b>
 /db — статистика базы свечей
-/backtest_phases — график бэктеста фаз (весь период из БД)
-/chart — свечной график с трендами Вверх / Вниз / Флэт (из БД)
-/trend_daily — тренд по всей БД ТФ D: график с зонами Вверх / Вниз / Флэт (последние до 2000 свечей)
+/health — свежесть БД по ТФ, последнее обновление
+
+<b>Прочее</b>
 /id — твой Telegram user id (для TELEGRAM_ALLOWED_IDS)
-/help — это сообщение"""
+/help — это сообщение
+
+Под сообщениями — кнопки: Сигнал | Зоны | Импульс | Обновить"""
 
 # Кнопки нижней панели (Reply)
 BTN_SIGNAL = "📊 Сигнал"
@@ -55,8 +69,12 @@ BTN_HIDE = "⬇ Скрыть панель"
 
 # Callback data для inline-кнопок
 CB_SIGNAL = "cb_signal"
+CB_ZONES = "cb_zones"
+CB_MOMENTUM = "cb_momentum"
 CB_DB = "cb_db"
 CB_REFRESH_SIGNAL = "cb_refresh_signal"
+CB_REFRESH_ZONES = "cb_refresh_zones"
+CB_REFRESH_MOMENTUM = "cb_refresh_momentum"
 CB_REFRESH_DB = "cb_refresh_db"
 
 MAIN_KEYBOARD = [
@@ -184,6 +202,49 @@ def _get_signal_text(db_conn=None) -> str:
             phase_parts.append(f"разрыв={score_gap:.2f}")
         phase_parts.append(f"неясна={phase_unclear}, устойчива={phase_stable}")
         lines.append("  Фаза: " + ", ".join(phase_parts))
+        # Зоны (поддержка/сопротивление, перевороты, confluence)
+        zones = r.get("trading_zones") or {}
+        if zones.get("levels") is not None:
+            lines.append("")
+            lines.append("Зоны (старший ТФ):")
+            z_low = zones.get("zone_low")
+            z_high = zones.get("zone_high")
+            in_z = zones.get("in_zone", False)
+            at_sup = zones.get("at_support_zone", False)
+            at_res = zones.get("at_resistance_zone", False)
+            n_conf = zones.get("levels_with_confluence", 0)
+            lines.append(f"  Зона: {z_low:.2f}–{z_high:.2f}" if z_low is not None and z_high is not None else "  Зона: —")
+            lines.append(f"  В зоне: {'да' if in_z else 'нет'} | у поддержки: {'да' if at_sup else 'нет'} | у сопротивления: {'да' if at_res else 'нет'} | confluence уровней: {n_conf}")
+            ns = zones.get("nearest_support")
+            nr = zones.get("nearest_resistance")
+            if ns:
+                dist_s = r.get("distance_to_support_pct")
+                s_str = f"  Поддержка: {ns.get('price', 0):.2f}" + (f" ({dist_s:.2%})" if dist_s is not None else "")
+                lines.append(s_str)
+            if nr:
+                dist_r = r.get("distance_to_resistance_pct")
+                r_str = f"  Сопротивление: {nr.get('price', 0):.2f}" + (f" ({dist_r:.2%})" if dist_r is not None else "")
+                lines.append(r_str)
+            flips = zones.get("recent_flips") or []
+            if flips:
+                lines.append(f"  Перевороты: {len(flips)}")
+                for flip in flips[:3]:
+                    lines.append(f"    {flip.get('price', 0):.2f} {flip.get('origin_role', '?')} → {flip.get('current_role', '?')}")
+        # Импульс по старшему ТФ
+        mom_state = r.get("higher_tf_momentum_state_ru") or "—"
+        mom_dir = r.get("higher_tf_momentum_direction_ru") or "—"
+        mom_rsi = r.get("higher_tf_momentum_rsi")
+        mom_ret = r.get("higher_tf_momentum_return_5")
+        lines.append("")
+        lines.append("Импульс (старший ТФ):")
+        lines.append(f"  Состояние: {mom_state}, направление: {mom_dir}" + (f", RSI: {mom_rsi:.0f}" if mom_rsi is not None else "") + (f", return_5: {mom_ret:.2%}" if mom_ret is not None else ""))
+        # Разбор score входа
+        br = r["signals"].get("entry_score_breakdown") or {}
+        if br:
+            parts = [f"phase={br.get('phase', 0):.2f}", f"trend={br.get('trend', 0):.2f}", f"tf_align={br.get('tf_align_ratio', 0):.2f}"]
+            if br.get("stability_bonus"):
+                parts.append(f"bonus={br.get('stability_bonus'):.2f}")
+            lines.append("  Score: " + ", ".join(parts))
         lines.extend(["", "По таймфреймам:"])
         lines = [x for x in lines if x]
         for tf, d in tfs.items():
@@ -249,21 +310,140 @@ def _get_db_text() -> str:
         return f"Ошибка БД: {e}"
 
 
+def _get_zones_text(db_conn=None) -> str:
+    """Только торговые зоны: поддержка/сопротивление, текущая зона, перевороты, confluence."""
+    try:
+        r = analyze_multi_timeframe(db_conn=db_conn)
+        zones = r.get("trading_zones") or {}
+        lines = [
+            f"Зоны | {config.SYMBOL}",
+            "",
+        ]
+        if not zones.get("levels"):
+            lines.append("Уровней нет (недостаточно данных по старшему ТФ).")
+            return "\n".join(lines)
+        z_low = zones.get("zone_low")
+        z_high = zones.get("zone_high")
+        in_z = zones.get("in_zone", False)
+        at_sup = zones.get("at_support_zone", False)
+        at_res = zones.get("at_resistance_zone", False)
+        n_conf = zones.get("levels_with_confluence", 0)
+        lines.append(f"Зона: {z_low:.2f} – {z_high:.2f}" if z_low is not None and z_high is not None else "Зона: —")
+        lines.append(f"В зоне: {'да' if in_z else 'нет'} | у поддержки: {'да' if at_sup else 'нет'} | у сопротивления: {'да' if at_res else 'нет'}")
+        lines.append(f"Уровней с confluence ≥2 ТФ: {n_conf}")
+        lines.append("")
+        ns = zones.get("nearest_support")
+        nr = zones.get("nearest_resistance")
+        dist_s = r.get("distance_to_support_pct")
+        dist_r = r.get("distance_to_resistance_pct")
+        if ns:
+            role = (ns.get("origin_role") or "—") + (" → " + (ns.get("current_role") or "") if ns.get("broken") else "")
+            lines.append(f"Поддержка: {ns.get('price', 0):.2f} ({role})" + (f" | до уровня {dist_s:.2%}" if dist_s is not None else ""))
+        if nr:
+            role = (nr.get("origin_role") or "—") + (" → " + (nr.get("current_role") or "") if nr.get("broken") else "")
+            lines.append(f"Сопротивление: {nr.get('price', 0):.2f} ({role})" + (f" | до уровня {dist_r:.2%}" if dist_r is not None else ""))
+        flips = zones.get("recent_flips") or []
+        if flips:
+            lines.append("")
+            lines.append(f"Перевороты ролей ({len(flips)}):")
+            for flip in flips[:5]:
+                lines.append(f"  {flip.get('price', 0):.2f}  {flip.get('origin_role', '?')} → {flip.get('current_role', '?')}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.exception("Ошибка при запросе зон: %s", e)
+        return f"Ошибка: {e}"
+
+
+def _get_momentum_text(db_conn=None) -> str:
+    """Только импульс по старшему ТФ: состояние, направление, RSI, return_5."""
+    try:
+        r = analyze_multi_timeframe(db_conn=db_conn)
+        lines = [
+            f"Импульс | {config.SYMBOL}",
+            "",
+            f"Состояние: {r.get('higher_tf_momentum_state_ru') or '—'} ({r.get('higher_tf_momentum_state', 'neutral')})",
+            f"Направление: {r.get('higher_tf_momentum_direction_ru') or '—'}",
+        ]
+        rsi = r.get("higher_tf_momentum_rsi")
+        ret5 = r.get("higher_tf_momentum_return_5")
+        if rsi is not None:
+            lines.append(f"RSI: {rsi:.0f}")
+        if ret5 is not None:
+            lines.append(f"Return 5 баров: {ret5:.2%}")
+        lines.append("")
+        lines.append("Сигнал: " + (r["signals"].get("direction") or "none") + " | уверенность: " + str(r["signals"].get("confidence_level", "—")))
+        return "\n".join(lines)
+    except Exception as e:
+        logger.exception("Ошибка при запросе импульса: %s", e)
+        return f"Ошибка: {e}"
+
+
+def _get_health_text(db_conn=None) -> str:
+    """Свежесть БД по ТФ: последняя свеча, время обновления."""
+    try:
+        conn = db_conn or get_connection()
+        if conn is None:
+            return "БД недоступна (TIMEFRAMES_DB пуст)."
+        cur = conn.cursor()
+        tfs = getattr(config, "TIMEFRAMES_DB", None) or getattr(config, "TIMEFRAMES", ["15", "60", "240"])
+        if not tfs:
+            return "Нет таймфреймов в конфиге."
+        from datetime import datetime
+        lines = [f"Health | {config.SYMBOL}", ""]
+        for tf in sorted(tfs, key=_tf_sort_key):
+            try:
+                rows = get_candles(cur, config.SYMBOL, tf, limit=1, order_asc=False)
+                if rows:
+                    last = rows[0]
+                    ts = last.get("start_time") or 0
+                    sec = ts / 1000 if ts > 1e10 else ts
+                    dt = datetime.utcfromtimestamp(sec).strftime("%Y-%m-%d %H:%M UTC")
+                    lines.append(f"  {_tf_label(tf)}: последняя свеча {dt}")
+                else:
+                    lines.append(f"  {_tf_label(tf)}: нет данных")
+            except Exception as e:
+                lines.append(f"  {_tf_label(tf)}: ошибка — {e}")
+        if conn is not db_conn:
+            conn.close()
+        return "\n".join(lines)
+    except Exception as e:
+        logger.exception("Ошибка при запросе health: %s", e)
+        return f"Ошибка: {e}"
+
+
 def _inline_actions_keyboard(kind: str):
-    """Inline-кнопки под сообщением: Обновить + переключение Сигнал/БД."""
+    """Inline-кнопки под сообщением: Сигнал | Зоны | Импульс | Обновить, БД."""
     if InlineKeyboardButton is None or InlineKeyboardMarkup is None:
         return None
+    row1 = [
+        InlineKeyboardButton("📊 Сигнал", callback_data=CB_SIGNAL),
+        InlineKeyboardButton("📐 Зоны", callback_data=CB_ZONES),
+        InlineKeyboardButton("📈 Импульс", callback_data=CB_MOMENTUM),
+    ]
     if kind == "signal":
-        row = [
+        row2 = [
             InlineKeyboardButton("🔄 Обновить", callback_data=CB_REFRESH_SIGNAL),
             InlineKeyboardButton("🗄 БД", callback_data=CB_DB),
         ]
-    else:
-        row = [
-            InlineKeyboardButton("🔄 Обновить", callback_data=CB_REFRESH_DB),
-            InlineKeyboardButton("📊 Сигнал", callback_data=CB_SIGNAL),
+        return InlineKeyboardMarkup([row1, row2])
+    if kind == "zones":
+        row2 = [
+            InlineKeyboardButton("🔄 Обновить", callback_data=CB_REFRESH_ZONES),
+            InlineKeyboardButton("🗄 БД", callback_data=CB_DB),
         ]
-    return InlineKeyboardMarkup([row])
+        return InlineKeyboardMarkup([row1, row2])
+    if kind == "momentum":
+        row2 = [
+            InlineKeyboardButton("🔄 Обновить", callback_data=CB_REFRESH_MOMENTUM),
+            InlineKeyboardButton("🗄 БД", callback_data=CB_DB),
+        ]
+        return InlineKeyboardMarkup([row1, row2])
+    # kind == "db": только Обновить и Сигнал (как раньше)
+    row2 = [
+        InlineKeyboardButton("🔄 Обновить", callback_data=CB_REFRESH_DB),
+        InlineKeyboardButton("📊 Сигнал", callback_data=CB_SIGNAL),
+    ]
+    return InlineKeyboardMarkup([row2])
 
 
 def _main_keyboard_markup():
@@ -310,6 +490,33 @@ async def _reply_db(chat_or_message, bot, send_action=True) -> None:
     await _send_long_with_inline(bot, chat_id, text, "db")
 
 
+async def _reply_zones(chat_or_message, bot, context=None, send_action=True) -> None:
+    chat_id = _resolve_chat_id(chat_or_message)
+    if send_action and hasattr(chat_or_message, "reply_chat_action"):
+        await chat_or_message.reply_chat_action("typing")
+    db_conn = context.application.bot_data.get("db_conn") if context else None
+    text = await asyncio.to_thread(_get_zones_text, db_conn)
+    await _send_long_with_inline(bot, chat_id, text, "zones")
+
+
+async def _reply_momentum(chat_or_message, bot, context=None, send_action=True) -> None:
+    chat_id = _resolve_chat_id(chat_or_message)
+    if send_action and hasattr(chat_or_message, "reply_chat_action"):
+        await chat_or_message.reply_chat_action("typing")
+    db_conn = context.application.bot_data.get("db_conn") if context else None
+    text = await asyncio.to_thread(_get_momentum_text, db_conn)
+    await _send_long_with_inline(bot, chat_id, text, "momentum")
+
+
+async def _reply_health(chat_or_message, bot, context=None) -> None:
+    chat_id = _resolve_chat_id(chat_or_message)
+    if hasattr(chat_or_message, "reply_chat_action"):
+        await chat_or_message.reply_chat_action("typing")
+    db_conn = context.application.bot_data.get("db_conn") if context else None
+    text = await asyncio.to_thread(_get_health_text, db_conn)
+    await bot.send_message(chat_id=chat_id, text=text)
+
+
 def _get_user_id(update) -> int:
     u = update.effective_user if hasattr(update, "effective_user") else None
     if update.callback_query:
@@ -324,7 +531,7 @@ async def cmd_start(update, context) -> None:
         return
     text = "Бот управления Bybit мультиТФ.\n\n" + HELP_TEXT + "\n\nНижняя панель и кнопки под ответами — быстрый доступ."
     markup = _main_keyboard_markup()
-    await update.message.reply_text(text, reply_markup=markup)
+    await update.message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 
 async def cmd_help(update, context) -> None:
@@ -332,7 +539,7 @@ async def cmd_help(update, context) -> None:
     if not _check_allowed(user_id):
         await update.message.reply_text("Доступ запрещён.")
         return
-    await update.message.reply_text(HELP_TEXT)
+    await update.message.reply_text(HELP_TEXT, parse_mode="HTML")
 
 
 async def cmd_signal(update, context) -> None:
@@ -360,6 +567,27 @@ async def cmd_db(update, context) -> None:
         await update.message.reply_text("Доступ запрещён.")
         return
     await _reply_db(update.message, context.bot)
+
+
+async def cmd_zones(update, context) -> None:
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    await _reply_zones(update.message, context.bot, context=context)
+
+
+async def cmd_momentum(update, context) -> None:
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    await _reply_momentum(update.message, context.bot, context=context)
+
+
+async def cmd_health(update, context) -> None:
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    await _reply_health(update.message, context.bot, context=context)
 
 
 async def cmd_id(update, context) -> None:
@@ -410,12 +638,8 @@ async def cmd_backtest_phases(update, context) -> None:
     await update.message.reply_photo(photo=buf, caption=caption[:1024])
 
 
-# Последние 2 года на дневном ТФ ≈ 730 свечей
-CHART_CANDLES_2Y = 730
-
-
-def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | None = None, timeframe: str = "D", limit: int = CHART_CANDLES_2Y, lookback: int = 100, show_trends: bool = False):
-    """Синхронно: при необходимости догружает ТФ до текущей даты, затем строит свечной график за последние limit дней. Возвращает (bytes_io, caption) или (None, error_text)."""
+def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | None = None, timeframe: str = "D", lookback: int = 100, show_trends: bool = False):
+    """Синхронно: при необходимости догружает ТФ до текущей даты, затем строит свечной график по всем свечам из БД (по максимуму). Возвращает (bytes_io, caption) или (None, error_text)."""
     try:
         from ..utils.backtest_chart import build_candlestick_trend_chart
     except ImportError:
@@ -426,19 +650,18 @@ def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | Non
     symbol = symbol or config.SYMBOL
     min_candles = (lookback + 1) if show_trends else 2
     try:
-        # db_helper: при устаревших данных догружает только этот ТФ, затем отдаёт последние limit дней (с кэшем)
-        candles = db_helper.ensure_fresh_then_get(conn, symbol, timeframe, days=limit, max_lag_sec=86400, use_cache=True)
+        candles = db_helper.ensure_fresh_then_get_all(conn, symbol, timeframe, max_lag_sec=86400, use_cache=True)
     finally:
         if conn is not db_conn:
             conn.close()
     if not candles or len(candles) < min_candles:
         return None, f"Недостаточно свечей в БД для графика (нужно минимум {min_candles}, есть {len(candles) if candles else 0}). Запустите accumulate_db.py."
     try:
+        n = len(candles)
         buf = build_candlestick_trend_chart(
-            candles, symbol, timeframe, lookback=lookback, show_trends=show_trends, dpi=120
+            candles, symbol, timeframe, lookback=lookback, show_trends=show_trends, max_candles_display=n, dpi=120
         )
         tf_label = _tf_label(timeframe)
-        # Диапазон дат: первая и последняя свеча (последние limit свечей по времени)
         from datetime import datetime
         def _ts_to_date(ts):
             s = ts / 1000 if ts > 1e10 else ts
@@ -446,7 +669,7 @@ def _run_candlestick_chart(db_conn: sqlite3.Connection | None, symbol: str | Non
         date_first = _ts_to_date(candles[0]["start_time"]) if candles else "—"
         date_last = _ts_to_date(candles[-1]["start_time"]) if candles else "—"
         caption = (
-            f"Свечной график | {symbol} ТФ {tf_label} | последние {len(candles)} свечей\n"
+            f"Свечной график | {symbol} ТФ {tf_label} | все {n} свечей из БД\n"
             f"Период: {date_first} — {date_last}"
             + (" | Тренды (Вверх / Вниз / Флэт)" if show_trends else "")
         )
@@ -464,7 +687,7 @@ async def cmd_chart(update, context) -> None:
     if hasattr(update.message, "reply_chat_action"):
         await update.message.reply_chat_action("typing")
     db_conn = (context.bot_data.get("db_conn") if context and context.bot_data else None) or None
-    buf, caption = await asyncio.to_thread(_run_candlestick_chart, db_conn, None, "D", CHART_CANDLES_2Y, 100)
+    buf, caption = await asyncio.to_thread(_run_candlestick_chart, db_conn, None, "D", 100)
     if buf is None:
         await update.message.reply_text(caption)
         return
@@ -501,6 +724,61 @@ def _run_trend_daily_full(db_conn: sqlite3.Connection | None):
         return None, f"Ошибка построения графика: {e}"
 
 
+def _run_phase_chart(db_conn: sqlite3.Connection | None, symbol: str | None = None, timeframe: str = "D"):
+    """Синхронно: загружает все свечи ТФ из БД (по максимуму), при необходимости догружает до актуальности, строит график с зонами 6 фаз. Возвращает (bytes_io, caption) или (None, error_text)."""
+    try:
+        from ..utils.backtest_chart import build_candlestick_phase_chart
+    except ImportError:
+        return None, "Для графиков нужен matplotlib: pip install matplotlib"
+    conn = db_conn or get_connection()
+    if conn is None:
+        return None, "БД недоступна."
+    symbol = symbol or config.SYMBOL or "BTCUSDT"
+    try:
+        if db_helper.is_stale(conn, symbol, timeframe, max_lag_sec=86400):
+            db_helper.catch_up_tf(conn, symbol, timeframe)
+        cur = conn.cursor()
+        candles = get_candles(cur, symbol, timeframe, limit=None, order_asc=True)
+    except Exception as e:
+        logger.exception("Ошибка загрузки свечей для графика фаз: %s", e)
+        return None, f"Ошибка загрузки данных: {e}"
+    if not candles or len(candles) < 101:
+        return None, f"Недостаточно свечей ТФ {timeframe} в БД (нужно минимум 101, есть {len(candles) if candles else 0}). Запустите bin/accumulate_db.py или bin/refill_tf_d.py."
+    try:
+        n = len(candles)
+        buf = build_candlestick_phase_chart(
+            candles, symbol, timeframe,
+            lookback=100, max_candles_display=n, dpi=120,
+        )
+        first_ts = candles[0]["start_time"]
+        last_ts = candles[-1]["start_time"]
+        first_sec = first_ts / 1000 if first_ts > 1e10 else first_ts
+        last_sec = last_ts / 1000 if last_ts > 1e10 else last_ts
+        from datetime import datetime
+        period_str = f"{datetime.utcfromtimestamp(first_sec).strftime('%d.%m.%Y')} – {datetime.utcfromtimestamp(last_sec).strftime('%d.%m.%Y')}"
+        caption = f"6 фаз рынка | {symbol} ТФ {timeframe}\nНа графике: все {n} свечей из БД ({period_str})"
+        return buf, caption
+    except Exception as e:
+        logger.exception("Ошибка построения графика фаз: %s", e)
+        return None, f"Ошибка построения графика: {e}"
+
+
+async def cmd_phases(update, context) -> None:
+    """Команда /phases: свечной график с зонами 6 фаз рынка (Накопление, Рост, Распределение, Падение, Капитуляция, Восстановление)."""
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    if hasattr(update.message, "reply_chat_action"):
+        await update.message.reply_chat_action("upload_photo")
+    db_conn = (context.bot_data.get("db_conn") if context and context.bot_data else None) or None
+    buf, caption = await asyncio.to_thread(_run_phase_chart, db_conn, None, "D")
+    if buf is None:
+        await update.message.reply_text(caption)
+        return
+    buf.seek(0)
+    await update.message.reply_photo(photo=buf, caption=caption[:1024])
+
+
 async def cmd_trend_daily(update, context) -> None:
     """Команда /trend_daily: тренд по всей БД на таймфрейме D с визуализацией (зоны Вверх / Вниз / Флэт)."""
     if not _check_allowed(_get_user_id(update)):
@@ -533,6 +811,10 @@ async def handle_callback(update, context) -> None:
     data = q.data
     if data == CB_SIGNAL:
         await _reply_signal(chat, bot, context=context, send_action=True)
+    elif data == CB_ZONES:
+        await _reply_zones(chat, bot, context=context, send_action=True)
+    elif data == CB_MOMENTUM:
+        await _reply_momentum(chat, bot, context=context, send_action=True)
     elif data == CB_DB:
         await _reply_db(chat, bot, send_action=True)
     elif data == CB_REFRESH_SIGNAL:
@@ -541,6 +823,26 @@ async def handle_callback(update, context) -> None:
         except Exception:
             pass
         await _reply_signal(chat, bot, context=context, send_action=False)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+    elif data == CB_REFRESH_ZONES:
+        try:
+            await q.edit_message_text("Обновляю зоны…")
+        except Exception:
+            pass
+        await _reply_zones(chat, bot, context=context, send_action=False)
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+    elif data == CB_REFRESH_MOMENTUM:
+        try:
+            await q.edit_message_text("Обновляю импульс…")
+        except Exception:
+            pass
+        await _reply_momentum(chat, bot, context=context, send_action=False)
         try:
             await q.message.delete()
         except Exception:
@@ -631,11 +933,15 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
         if BotCommand is not None:
             await app.bot.set_my_commands([
                 BotCommand("start", "Старт и панель"),
-                BotCommand("signal", "Сигнал и фазы по таймфреймам"),
+                BotCommand("signal", "Сигнал, фазы, зоны, импульс"),
                 BotCommand("status", "Краткий статус (одна строка)"),
+                BotCommand("zones", "Торговые зоны: поддержка/сопротивление"),
+                BotCommand("momentum", "Импульс: RSI, состояние, направление"),
                 BotCommand("db", "Статистика БД"),
+                BotCommand("health", "Свежесть БД по ТФ"),
                 BotCommand("backtest_phases", "График бэктеста фаз"),
                 BotCommand("chart", "Свечной график: тренды Вверх/Вниз/Флэт"),
+                BotCommand("phases", "График 6 фаз рынка"),
                 BotCommand("trend_daily", "Тренд по всей БД ТФ D"),
                 BotCommand("id", "Мой user id"),
                 BotCommand("help", "Помощь"),
@@ -653,8 +959,12 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
     app.add_handler(CommandHandler("signal", cmd_signal))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("db", cmd_db))
+    app.add_handler(CommandHandler("zones", cmd_zones))
+    app.add_handler(CommandHandler("momentum", cmd_momentum))
+    app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("backtest_phases", cmd_backtest_phases))
     app.add_handler(CommandHandler("chart", cmd_chart))
+    app.add_handler(CommandHandler("phases", cmd_phases))
     app.add_handler(CommandHandler("trend_daily", cmd_trend_daily))
     app.add_handler(CommandHandler("id", cmd_id))
 
@@ -670,6 +980,7 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
         db_conn = open_and_prepare()
         own_conn = True
     app.bot_data["db_conn"] = db_conn
+    app.bot_data["last_signal_direction"] = "none"
     if db_conn is not None and own_conn:
         last_db_ts: list[float] = [time.time()]
 
@@ -684,6 +995,43 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
         logger.info("БД будет обновляться каждые %s с", config.DB_UPDATE_INTERVAL_SEC)
     elif db_conn is None:
         logger.info("TIMEFRAMES_DB пуст — обновление БД отключено")
+
+    # Алерт при смене сигнала: раз в N сек проверяем direction, при смене шлём в TELEGRAM_ALERT_CHAT_ID
+    alert_chat_id = getattr(config, "TELEGRAM_ALERT_CHAT_ID", None)
+    alert_on_change = getattr(config, "TELEGRAM_ALERT_ON_SIGNAL_CHANGE", False)
+    alert_interval = getattr(config, "TELEGRAM_ALERT_INTERVAL_SEC", 90.0) or 90.0
+    alert_min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 0.0) or 0.0
+    if alert_chat_id and alert_on_change and app.job_queue:
+
+        async def _alert_on_signal_change_job(context) -> None:
+            conn = context.application.bot_data.get("db_conn")
+            try:
+                r = await asyncio.to_thread(analyze_multi_timeframe, db_conn=conn)
+            except Exception as e:
+                logger.warning("Алерт-проверка сигнала: %s", e)
+                return
+            direction = (r.get("signals") or {}).get("direction") or "none"
+            confidence = (r.get("signals") or {}).get("confidence") or 0.0
+            last = context.application.bot_data.get("last_signal_direction", "none")
+            context.application.bot_data["last_signal_direction"] = direction
+            if direction == last:
+                return
+            if confidence < alert_min_conf:
+                return
+            emoji = DIR_EMOJI.get(direction, direction.upper())
+            phase_ru = r.get("higher_tf_phase_ru") or "—"
+            text = f"{emoji} Смена сигнала: {direction.upper()} | {config.SYMBOL} | фаза {phase_ru} | уверенность {confidence:.2f}"
+            try:
+                await context.bot.send_message(chat_id=alert_chat_id, text=text)
+            except Exception as e:
+                logger.warning("Не удалось отправить алерт в %s: %s", alert_chat_id, e)
+
+        app.job_queue.run_repeating(
+            _alert_on_signal_change_job,
+            interval=alert_interval,
+            first=min(30, max(10, int(alert_interval))),
+        )
+        logger.info("Алерты при смене сигнала: каждые %s с в чат %s", alert_interval, alert_chat_id)
 
     logger.info("Telegram-бот запущен. Остановка: Ctrl+C.")
     try:

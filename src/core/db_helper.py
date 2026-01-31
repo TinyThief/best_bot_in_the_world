@@ -145,6 +145,41 @@ def ensure_fresh_then_get(
     return candles
 
 
+# Ключ кэша «все свечи» — days=-1
+_ALL_DAYS_KEY = -1
+
+
+def ensure_fresh_then_get_all(
+    conn: sqlite3.Connection,
+    symbol: str,
+    timeframe: str,
+    max_lag_sec: int = 86400,
+    use_cache: bool = True,
+) -> list[dict[str, Any]]:
+    """
+    Если данные по ТФ устарели — догружает этот ТФ до текущего момента,
+    затем возвращает все свечи из БД (по максимуму). Порядок: от старых к новым.
+    """
+    if conn is None:
+        return []
+    cache_key = (symbol, timeframe, _ALL_DAYS_KEY)
+    if use_cache and cache_key in _CACHE:
+        cached_candles, cached_at = _CACHE[cache_key]
+        if time.time() - cached_at < _CACHE_TTL_SEC:
+            return cached_candles
+        del _CACHE[cache_key]
+    if is_stale(conn, symbol, timeframe, max_lag_sec):
+        n = catch_up_tf(conn, symbol, timeframe)
+        if n:
+            logger.info("БД: догружено ТФ %s для %s — %s свечей", timeframe, symbol, n)
+        _CACHE.pop(cache_key, None)
+    cur = conn.cursor()
+    candles = get_candles(cur, symbol, timeframe, limit=None, order_asc=True)
+    if use_cache:
+        _CACHE[cache_key] = (candles, time.time())
+    return candles
+
+
 def cache_clear() -> None:
     """Очистить кэш выборок (например после ручного обновления БД)."""
     _CACHE.clear()

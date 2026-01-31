@@ -42,6 +42,7 @@ best_bot_in_the_world/
 ├── ДЛЯ_КОМАНДЫ.md       # Онбординг: структура, файлы, .env
 ├── STRUCTURE.md         # Этот файл — карта проекта
 ├── AUDIT_VISUALIZATION.md  # Аудит визуализации графика
+├── docs/                # Дизайн: trading_zones, parallel multi_tf, telegram upgrade, Wyckoff
 ├── .cursorrules         # Правила для Cursor (корень)
 ├── .cursor/rules/       # Правила Cursor (trading-bot.mdc)
 │
@@ -54,14 +55,15 @@ best_bot_in_the_world/
 │   │   └── logging_config.py
 │   ├── analysis/        # Аналитика
 │   │   ├── market_phases.py   # Фазы рынка (Вайкофф + индикаторы)
-│   │   ├── market_trend.py    # Тренд и режим рынка
-│   │   ├── multi_tf.py        # МультиТФ-анализ, сигнал long/short/none
+│   │   ├── market_trend.py    # Тренд, режим рынка, импульс
+│   │   ├── trading_zones.py   # Торговые зоны (уровни, перевороты ролей, confluence)
+│   │   ├── multi_tf.py        # МультиТФ-анализ (параллельно по ТФ), сигнал long/short/none
 │   │   └── phase_*.py         # Экспериментальные модули фаз
 │   ├── app/             # Приложения
 │   │   ├── main.py      # Цикл бота, db_sync, опционально Telegram
 │   │   ├── bot_loop.py  # Один тик: обновление БД + анализ + лог
 │   │   ├── db_sync.py   # Подготовка БД, refresh_if_due
-│   │   └── telegram_bot.py    # Команды /start, /signal, /chart и т.д.
+│   │   └── telegram_bot.py    # Команды /signal, /zones, /momentum, /health, /chart; inline Сигнал|Зоны|Импульс; алерт при смене сигнала
 │   ├── scripts/         # Скрипты (логика; точки входа — bin/)
 │   │   ├── accumulate_db.py
 │   │   ├── full_backfill.py
@@ -69,7 +71,8 @@ best_bot_in_the_world/
 │   │   ├── backtest_phases.py, backtest_trend.py
 │   │   ├── compare_phase_methods.py
 │   │   ├── trend_daily_full.py, trend_backtest_report.py
-│   │   └── test_run_once.py
+│   │   ├── test_run_once.py, test_zones.py
+│   │   └── README.md          # Список команд bin/
 │   └── utils/           # Утилиты
 │       ├── backtest_chart.py  # Графики (фазы, тренд, свечной /chart)
 │       ├── candle_quality.py
@@ -152,7 +155,7 @@ best_bot_in_the_world/
 | Пакет | Назначение |
 |-------|------------|
 | **src/core** | Конфиг, БД, биржа, db_helper, логирование |
-| **src/analysis** | Фазы рынка, тренд/режим, мультиТФ-анализ и сигнал |
+| **src/analysis** | Фазы рынка, тренд/режим/импульс, торговые зоны, мультиТФ-анализ (параллельно по ТФ) и сигнал |
 | **src/app** | Цикл бота, синхронизация БД, Telegram-бот |
 | **src/scripts** | Накопление БД, бэкфилл, бэктесты, сравнения (логика) |
 | **src/utils** | Графики, качество свечей, хелперы, валидаторы |

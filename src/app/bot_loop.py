@@ -69,6 +69,44 @@ def _log_report(report: dict[str, Any]) -> None:
         regime_atr if regime_atr is not None else "—",
         regime_ok,
     )
+    mom_state = report.get("higher_tf_momentum_state_ru") or "—"
+    mom_dir = report.get("higher_tf_momentum_direction_ru") or "—"
+    mom_rsi = report.get("higher_tf_momentum_rsi")
+    logger.info(
+        "  Старший ТФ импульс: %s (%s), направление=%s, RSI=%s",
+        report.get("higher_tf_momentum_state", "neutral"),
+        mom_state,
+        mom_dir,
+        mom_rsi if mom_rsi is not None else "—",
+    )
+    # Торговые зоны (уровни с переключением ролей: сопротивление → поддержка и наоборот)
+    zones = report.get("trading_zones") or {}
+    if zones.get("levels"):
+        z_low = zones.get("zone_low")
+        z_high = zones.get("zone_high")
+        in_z = zones.get("in_zone", False)
+        ns = zones.get("nearest_support")
+        nr = zones.get("nearest_resistance")
+        rf = zones.get("recent_flips") or []
+        at_sup = zones.get("at_support_zone", False)
+        at_res = zones.get("at_resistance_zone", False)
+        levels_conf = zones.get("levels_with_confluence", 0)
+        logger.info(
+            "  Зоны: зона %s–%s, в_зоне=%s | у_поддержки=%s у_сопротивления=%s | конfluence_уровней=%s | поддержка=%s (%s) | сопротивление=%s (%s) | переворотов=%s",
+            round(z_low, 2) if z_low is not None else "—",
+            round(z_high, 2) if z_high is not None else "—",
+            in_z,
+            at_sup,
+            at_res,
+            levels_conf,
+            round(ns["price"], 2) if ns else "—",
+            (ns.get("origin_role") or "—") + ("→" + (ns.get("current_role") or "") if ns and ns.get("broken") else ""),
+            round(nr["price"], 2) if nr else "—",
+            (nr.get("origin_role") or "—") + ("→" + (nr.get("current_role") or "") if nr and nr.get("broken") else ""),
+            len(rf),
+        )
+        for flip in rf[:3]:
+            logger.info("    Переворот: %.2f было %s → стало %s", flip.get("price", 0), flip.get("origin_role", "—"), flip.get("current_role", "—"))
     for tf, data in report.get("timeframes", {}).items():
         trend = data.get("trend", "?")
         trend_str = data.get("trend_strength", 0.0)

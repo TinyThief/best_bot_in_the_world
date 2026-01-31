@@ -47,6 +47,7 @@ BEARISH_PHASES = {"markdown", "distribution"}
 
 # Профили порогов по таймфрейму (короткий ТФ — больше шума, длинный — плавнее)
 # Ключи: "short" (1,3,5,15,30), "long" (60,120,240,D,W,M)
+# long: подобрано через backtest_phases --tune для ТФ 60 (BTCUSDT), точность ~44.8%
 PHASE_PROFILES = {
     "short": {
         "vol_spike": 2.0,
@@ -55,10 +56,10 @@ PHASE_PROFILES = {
         "range_position_high": 0.70,
     },
     "long": {
-        "vol_spike": 1.5,
-        "drop_threshold": -0.07,
+        "vol_spike": 1.8,
+        "drop_threshold": -0.04,
         "range_position_low": 0.35,
-        "range_position_high": 0.70,
+        "range_position_high": 0.65,
     },
 }
 
@@ -655,6 +656,211 @@ def _apply_higher_tf_context(
     return score
 
 
+def _compute_unified_phase_scores(
+    *,
+    structure: str,
+    pos: float,
+    r5: float,
+    r20: float,
+    rsi_val: float,
+    vol: float,
+    trend_str: float,
+    ema_trend: str | None,
+    adx: float,
+    vwap_dist: float,
+    obv_s: float,
+    bb_w: float,
+    vol_at_low_val: float,
+    vol_at_high_val: float,
+    buying_pressure_val: float,
+    selling_pressure_val: float,
+    spring: bool,
+    upthrust: bool,
+    spring_vol: bool,
+    upthrust_vol: bool,
+    selling_climax: bool,
+    buying_climax: bool,
+    fresh_low: bool,
+    fresh_high: bool,
+    rsi_bull_div: bool,
+    rsi_bear_div: bool,
+    vol_spike: float,
+    drop_threshold: float,
+    range_position_low: float,
+    range_position_high: float,
+) -> dict[str, float]:
+    """
+    Единая оценка всех 6 фаз по одним и тем же метрикам.
+    Возвращает dict phase -> score (0..1). Выбор фазы по argmax — без порядка if'ов.
+    """
+    scores: dict[str, float] = {}
+
+    # Capitulation: резкое падение + объём
+    sc_cap = 0.0
+    if r5 <= drop_threshold and vol >= vol_spike:
+        sc_cap = min(1.0, abs(r5) * 5 + (vol - 1) * 0.2)
+        if rsi_val < 30:
+            sc_cap = _clip_score(sc_cap + 0.05)
+        if selling_climax:
+            sc_cap = _clip_score(sc_cap + 0.06)
+        if spring_vol:
+            sc_cap = _clip_score(sc_cap + 0.03)
+    scores["capitulation"] = sc_cap
+
+    # Recovery: r5 > 0, r20 < 0 (отскок после падения)
+    sc_rec = 0.0
+    if r5 > 0.01 and r20 < -0.02:
+        strength = min(1.0, (r5 - 0.01) / 0.02) * 0.5 + min(1.0, abs(r20) / 0.05) * 0.3
+        sc_rec = _clip_score(0.55 + strength)
+        if rsi_val < 35:
+            sc_rec = _clip_score(sc_rec + 0.08)
+        if rsi_bull_div:
+            sc_rec = _clip_score(sc_rec + 0.05)
+        if ema_trend == "bullish" or vwap_dist > 0:
+            sc_rec = _clip_score(sc_rec + 0.02)
+        if obv_s > 0.05:
+            sc_rec = _clip_score(sc_rec + 0.02)
+    scores["recovery"] = sc_rec
+
+    # Markup: структура вверх, r20 >= -0.01, подтверждения
+    sc_mu = 0.0
+    if structure == "up" and r20 >= -0.01:
+        strength = (r20 + 0.01) / 0.04
+        sc_mu = _clip_score(0.65 + 0.2 * min(1.0, max(0.0, strength)))
+        if rsi_val > 70:
+            sc_mu = _clip_score(sc_mu - 0.1)
+        if trend_str > 0.4:
+            sc_mu = _clip_score(sc_mu + 0.03)
+        elif trend_str < 0.2:
+            sc_mu = _clip_score(sc_mu - 0.03)
+        confirm_bull = sum([ema_trend == "bullish", adx > 25, vwap_dist > 0, obv_s > 0.05])
+        if confirm_bull >= 3:
+            sc_mu = _clip_score(sc_mu + 0.08)
+        elif confirm_bull >= 2:
+            sc_mu = _clip_score(sc_mu + 0.05)
+        else:
+            if ema_trend == "bullish":
+                sc_mu = _clip_score(sc_mu + 0.03)
+            if adx > 25:
+                sc_mu = _clip_score(sc_mu + 0.02)
+            if obv_s > 0.05 or vwap_dist > 0:
+                sc_mu = _clip_score(sc_mu + 0.02)
+    elif (r20 or 0) > 0.01:
+        strength = min(1.0, ((r20 or 0) - 0.01) / 0.02)
+        sc_mu = _clip_score(0.4 + 0.2 * strength)
+        if rsi_val > 70:
+            sc_mu = _clip_score(sc_mu - 0.08)
+    if (r20 or 0) > 0.02 and structure != "down":
+        strength = min(1.0, ((r20 or 0) - 0.02) / 0.05)
+        sc_mu = max(sc_mu, _clip_score(0.5 + 0.3 * strength))
+        if rsi_val > 70:
+            sc_mu = _clip_score(sc_mu - 0.1)
+    scores["markup"] = sc_mu
+
+    # Markdown: структура вниз, r20 <= 0.01, подтверждения
+    sc_md = 0.0
+    if structure == "down" and r20 <= 0.01:
+        strength = (-r20 + 0.01) / 0.04
+        sc_md = _clip_score(0.65 + 0.2 * min(1.0, max(0.0, strength)))
+        if rsi_val < 30:
+            sc_md = _clip_score(sc_md + 0.05)
+        if rsi_bear_div:
+            sc_md = _clip_score(sc_md + 0.03)
+        if trend_str > 0.4:
+            sc_md = _clip_score(sc_md + 0.03)
+        elif trend_str < 0.2:
+            sc_md = _clip_score(sc_md - 0.03)
+        confirm_bear = sum([ema_trend == "bearish", adx > 25, vwap_dist < 0, obv_s < -0.05])
+        if confirm_bear >= 3:
+            sc_md = _clip_score(sc_md + 0.08)
+        elif confirm_bear >= 2:
+            sc_md = _clip_score(sc_md + 0.05)
+        else:
+            if ema_trend == "bearish":
+                sc_md = _clip_score(sc_md + 0.03)
+            if adx > 25 or obv_s < -0.05 or vwap_dist < 0:
+                sc_md = _clip_score(sc_md + 0.02)
+    elif (r20 or 0) < -0.01:
+        strength = min(1.0, (abs(r20 or 0) - 0.01) / 0.02)
+        sc_md = max(sc_md, _clip_score(0.4 + 0.2 * strength))
+        if rsi_val < 30:
+            sc_md = _clip_score(sc_md + 0.05)
+        if rsi_bear_div:
+            sc_md = _clip_score(sc_md + 0.03)
+    if (r20 or 0) < -0.02 and structure != "up":
+        strength = min(1.0, (abs(r20 or 0) - 0.02) / 0.05)
+        sc_md = max(sc_md, _clip_score(0.5 + 0.3 * strength))
+        if rsi_val < 30:
+            sc_md = _clip_score(sc_md + 0.05)
+        if rsi_bear_div:
+            sc_md = _clip_score(sc_md + 0.03)
+    scores["markdown"] = sc_md
+
+    # Accumulation: диапазон, позиция у низа, объём/давление у низа
+    sc_acc = 0.0
+    if structure == "range":
+        if pos <= range_position_low:
+            strength = 1.0 - (pos / max(0.01, range_position_low))
+            sc_acc = _clip_score(0.5 + 0.25 * strength)
+            if vol_at_low_val > 1.15:
+                sc_acc = _clip_score(sc_acc + 0.05)
+            if buying_pressure_val > 1.15:
+                sc_acc = _clip_score(sc_acc + 0.03)
+            if rsi_bull_div:
+                sc_acc = _clip_score(sc_acc + 0.04)
+            if spring:
+                sc_acc = _clip_score(sc_acc + 0.05)
+            if spring_vol:
+                sc_acc = _clip_score(sc_acc + 0.03)
+            if trend_str < 0.3:
+                sc_acc = _clip_score(sc_acc + 0.03)
+            if fresh_low:
+                sc_acc = _clip_score(sc_acc + 0.02)
+            if adx < 20:
+                sc_acc = _clip_score(sc_acc + 0.02)
+            if bb_w < 0.04:
+                sc_acc = _clip_score(sc_acc + 0.02)
+        else:
+            sc_acc = _clip_score(0.4 + 0.25 * (1.0 - pos))
+    if structure != "range" and (r20 or 0) >= -0.01 and (r20 or 0) <= 0.01:
+        sc_acc = max(sc_acc, 0.3)
+    scores["accumulation"] = sc_acc
+
+    # Distribution: диапазон, позиция у верха
+    sc_dist = 0.0
+    if structure == "range":
+        if pos >= range_position_high:
+            strength = (pos - range_position_high) / max(0.01, 1.0 - range_position_high)
+            sc_dist = _clip_score(0.5 + 0.25 * min(1.0, strength))
+            if rsi_val > 70:
+                sc_dist = _clip_score(sc_dist + 0.08)
+            if vol_at_high_val > 1.15:
+                sc_dist = _clip_score(sc_dist + 0.05)
+            if selling_pressure_val > 1.15:
+                sc_dist = _clip_score(sc_dist + 0.03)
+            if rsi_bear_div:
+                sc_dist = _clip_score(sc_dist + 0.04)
+            if upthrust:
+                sc_dist = _clip_score(sc_dist + 0.05)
+            if upthrust_vol:
+                sc_dist = _clip_score(sc_dist + 0.03)
+            if buying_climax:
+                sc_dist = _clip_score(sc_dist + 0.05)
+            if trend_str < 0.3:
+                sc_dist = _clip_score(sc_dist + 0.03)
+            if fresh_high:
+                sc_dist = _clip_score(sc_dist + 0.02)
+            if adx < 20:
+                sc_dist = _clip_score(sc_dist + 0.02)
+            if bb_w < 0.04:
+                sc_dist = _clip_score(sc_dist + 0.02)
+        else:
+            sc_dist = _clip_score(0.4 + 0.25 * pos)
+    scores["distribution"] = sc_dist
+
+    return scores
+
+
 def _rough_alternative_scores(primary_phase: str, details: dict[str, Any]) -> dict[str, float]:
     """
     Оценка «альтернативных» фаз по тем же метрикам (для второго кандидата и разрыва score).
@@ -709,8 +915,14 @@ def _build_phase_result(
     phase: str,
     score: float,
     details: dict[str, Any],
+    *,
+    secondary_phase: str | None = None,
+    secondary_score: float | None = None,
+    score_gap: float | None = None,
 ) -> dict[str, Any]:
-    """Дополняет результат фазы: второй кандидат, разрыв score, phase_unclear."""
+    """Дополняет результат фазы: второй кандидат, разрыв score, phase_unclear.
+    Если переданы secondary_phase, secondary_score, score_gap — используются они (единая оценка);
+    иначе считается через _rough_alternative_scores."""
     phase_score_min = getattr(config, "PHASE_SCORE_MIN", 0.6)
     unclear_threshold = getattr(config, "PHASE_UNCLEAR_THRESHOLD", 0.5)
     min_gap = getattr(config, "PHASE_MIN_GAP", 0.1)
@@ -721,6 +933,18 @@ def _build_phase_result(
         "score": score,
         "details": details,
     }
+    if secondary_phase is not None and secondary_score is not None and score_gap is not None:
+        gap_val = round(max(0.0, score_gap), 4)
+        base["secondary_phase"] = secondary_phase
+        base["secondary_phase_ru"] = PHASE_NAMES_RU.get(secondary_phase, secondary_phase)
+        base["secondary_score"] = round(secondary_score, 4)
+        base["score_gap"] = gap_val
+        base["phase_unclear"] = (
+            score < unclear_threshold
+            or score < phase_score_min
+            or gap_val < min_gap
+        )
+        return base
     alt_scores = _rough_alternative_scores(phase, details)
     if not alt_scores:
         base["secondary_phase"] = None
@@ -729,19 +953,18 @@ def _build_phase_result(
         base["score_gap"] = score
         base["phase_unclear"] = score < unclear_threshold or score < phase_score_min
         return base
-    secondary_phase = max(alt_scores, key=alt_scores.get)
-    secondary_score = alt_scores[secondary_phase]
-    score_gap = round(max(0.0, score - secondary_score), 4)
-    phase_unclear = (
+    sec_phase = max(alt_scores, key=alt_scores.get)
+    sec_score = alt_scores[sec_phase]
+    gap_val = round(max(0.0, score - sec_score), 4)
+    base["secondary_phase"] = sec_phase
+    base["secondary_phase_ru"] = PHASE_NAMES_RU.get(sec_phase, sec_phase)
+    base["secondary_score"] = round(sec_score, 4)
+    base["score_gap"] = gap_val
+    base["phase_unclear"] = (
         score < unclear_threshold
         or score < phase_score_min
-        or score_gap < min_gap
+        or gap_val < min_gap
     )
-    base["secondary_phase"] = secondary_phase
-    base["secondary_phase_ru"] = PHASE_NAMES_RU.get(secondary_phase, secondary_phase)
-    base["secondary_score"] = round(secondary_score, 4)
-    base["score_gap"] = score_gap
-    base["phase_unclear"] = phase_unclear
     return base
 
 
@@ -870,173 +1093,72 @@ def detect_phase(
     obv_s = obv_slope if obv_slope is not None else 0.0
     vwap_dist = vwap_distance if vwap_distance is not None else 0.0
 
-    if r5 <= drop_threshold and vol >= vol_spike:
-        sc = min(1.0, abs(r5) * 5 + (vol - 1) * 0.2)
-        if rsi_val < 30:
-            sc = _clip_score(sc + 0.05)
-        if selling_climax:
-            sc = _clip_score(sc + 0.06)
-        if spring_vol:
-            sc = _clip_score(sc + 0.03)
-        sc = _apply_higher_tf_context("capitulation", sc, higher_tf_phase, higher_tf_trend)
-        return _build_phase_result("capitulation", sc, details)
+    # Единая оценка всех 6 фаз (без порядка if'ов), затем выбор по argmax
+    scores = _compute_unified_phase_scores(
+        structure=structure,
+        pos=pos,
+        r5=r5,
+        r20=r20,
+        rsi_val=rsi_val,
+        vol=vol,
+        trend_str=trend_str,
+        ema_trend=ema_trend,
+        adx=adx,
+        vwap_dist=vwap_dist,
+        obv_s=obv_s,
+        bb_w=bb_w,
+        vol_at_low_val=vol_at_low_val,
+        vol_at_high_val=vol_at_high_val,
+        buying_pressure_val=buying_pressure_val,
+        selling_pressure_val=selling_pressure_val,
+        spring=spring,
+        upthrust=upthrust,
+        spring_vol=spring_vol,
+        upthrust_vol=upthrust_vol,
+        selling_climax=selling_climax,
+        buying_climax=buying_climax,
+        fresh_low=fresh_low,
+        fresh_high=fresh_high,
+        rsi_bull_div=rsi_bull_div,
+        rsi_bear_div=rsi_bear_div,
+        vol_spike=vol_spike,
+        drop_threshold=drop_threshold,
+        range_position_low=range_position_low,
+        range_position_high=range_position_high,
+    )
 
-    if r5 is not None and r20 is not None and r5 > 0.01 and r20 < -0.02:
-        strength = min(1.0, (r5 - 0.01) / 0.02) * 0.5 + min(1.0, abs(r20) / 0.05) * 0.3
-        sc = _clip_score(0.55 + strength)
-        if rsi_val < 35:
-            sc = _clip_score(sc + 0.08)
-        if rsi_bull_div:
-            sc = _clip_score(sc + 0.05)
-        if ema_trend == "bullish" or vwap_dist > 0:
-            sc = _clip_score(sc + 0.02)
-        if obv_s > 0.05:
-            sc = _clip_score(sc + 0.02)
-        sc = _apply_higher_tf_context("recovery", sc, higher_tf_phase, higher_tf_trend)
-        return _build_phase_result("recovery", sc, details)
+    # Режимно-зависимый буст: в диапазоне (ADX < 20) усилить accumulation/distribution,
+    # в тренде (ADX >= 25) — markup/markdown
+    if adx < 20:
+        for p in ("accumulation", "distribution"):
+            if p in scores:
+                scores[p] = min(1.0, scores[p] * 1.12)
+    elif adx >= 25:
+        for p in ("markup", "markdown"):
+            if p in scores:
+                scores[p] = min(1.0, scores[p] * 1.08)
 
-    if structure == "up" and (r20 is None or r20 >= -0.01):
-        strength = (r20 + 0.01) / 0.04 if r20 is not None else 0.5
-        sc = _clip_score(0.65 + 0.2 * min(1.0, max(0.0, strength)))
-        if rsi_val > 70:
-            sc = _clip_score(sc - 0.1)
-        if trend_str > 0.4:
-            sc = _clip_score(sc + 0.03)
-        elif trend_str < 0.2:
-            sc = _clip_score(sc - 0.03)
-        confirm_bull = sum([ema_trend == "bullish", adx > 25, vwap_dist > 0, obv_s > 0.05])
-        if confirm_bull >= 3:
-            sc = _clip_score(sc + 0.08)
-        elif confirm_bull >= 2:
-            sc = _clip_score(sc + 0.05)
-        else:
-            if ema_trend == "bullish":
-                sc = _clip_score(sc + 0.03)
-            if adx > 25:
-                sc = _clip_score(sc + 0.02)
-            if obv_s > 0.05:
-                sc = _clip_score(sc + 0.02)
-            if vwap_dist > 0:
-                sc = _clip_score(sc + 0.02)
-        sc = _apply_higher_tf_context("markup", sc, higher_tf_phase, higher_tf_trend)
-        return _build_phase_result("markup", sc, details)
-    if structure == "down" and (r20 is None or r20 <= 0.01):
-        strength = (-r20 + 0.01) / 0.04 if r20 is not None else 0.5
-        sc = _clip_score(0.65 + 0.2 * min(1.0, max(0.0, strength)))
-        if rsi_val < 30:
-            sc = _clip_score(sc + 0.05)
-        if rsi_bear_div:
-            sc = _clip_score(sc + 0.03)
-        if trend_str > 0.4:
-            sc = _clip_score(sc + 0.03)
-        elif trend_str < 0.2:
-            sc = _clip_score(sc - 0.03)
-        confirm_bear = sum([ema_trend == "bearish", adx > 25, vwap_dist < 0, obv_s < -0.05])
-        if confirm_bear >= 3:
-            sc = _clip_score(sc + 0.08)
-        elif confirm_bear >= 2:
-            sc = _clip_score(sc + 0.05)
-        else:
-            if ema_trend == "bearish":
-                sc = _clip_score(sc + 0.03)
-            if adx > 25:
-                sc = _clip_score(sc + 0.02)
-            if obv_s < -0.05:
-                sc = _clip_score(sc + 0.02)
-            if vwap_dist < 0:
-                sc = _clip_score(sc + 0.02)
-        sc = _apply_higher_tf_context("markdown", sc, higher_tf_phase, higher_tf_trend)
-        return _build_phase_result("markdown", sc, details)
+    # Первая и вторая фазы по score
+    sorted_phases = sorted(scores.keys(), key=lambda p: scores[p], reverse=True)
+    primary = sorted_phases[0] if sorted_phases else "accumulation"
+    secondary = sorted_phases[1] if len(sorted_phases) > 1 else None
+    primary_score_raw = scores[primary]
+    secondary_score_raw = scores[secondary] if secondary else 0.0
+    score_gap_raw = primary_score_raw - secondary_score_raw
 
-    if structure == "range":
-        if position is not None and pos <= range_position_low:
-            # Чем ближе к низу диапазона, тем увереннее accumulation
-            strength = 1.0 - (pos / max(0.01, range_position_low))
-            sc = _clip_score(0.5 + 0.25 * strength)
-            if vol_at_low_val > 1.15:
-                sc = _clip_score(sc + 0.05)
-            if buying_pressure_val > 1.15:
-                sc = _clip_score(sc + 0.03)
-            if rsi_bull_div:
-                sc = _clip_score(sc + 0.04)
-            if spring:
-                sc = _clip_score(sc + 0.05)
-            if spring_vol:
-                sc = _clip_score(sc + 0.03)
-            if trend_str < 0.3:
-                sc = _clip_score(sc + 0.03)
-            if fresh_low:
-                sc = _clip_score(sc + 0.02)
-            if adx < 20:
-                sc = _clip_score(sc + 0.02)
-            if bb_w < 0.04:
-                sc = _clip_score(sc + 0.02)
-            sc = _apply_higher_tf_context("accumulation", sc, higher_tf_phase, higher_tf_trend)
-            return _build_phase_result("accumulation", sc, details)
-        if position is not None and pos >= range_position_high:
-            strength = (pos - range_position_high) / max(0.01, 1.0 - range_position_high)
-            sc = _clip_score(0.5 + 0.25 * min(1.0, strength))
-            if rsi_val > 70:
-                sc = _clip_score(sc + 0.08)
-            if vol_at_high_val > 1.15:
-                sc = _clip_score(sc + 0.05)
-            if selling_pressure_val > 1.15:
-                sc = _clip_score(sc + 0.03)
-            if rsi_bear_div:
-                sc = _clip_score(sc + 0.04)
-            if upthrust:
-                sc = _clip_score(sc + 0.05)
-            if upthrust_vol:
-                sc = _clip_score(sc + 0.03)
-            if buying_climax:
-                sc = _clip_score(sc + 0.05)
-            if trend_str < 0.3:
-                sc = _clip_score(sc + 0.03)
-            if fresh_high:
-                sc = _clip_score(sc + 0.02)
-            if adx < 20:
-                sc = _clip_score(sc + 0.02)
-            if bb_w < 0.04:
-                sc = _clip_score(sc + 0.02)
-            sc = _apply_higher_tf_context("distribution", sc, higher_tf_phase, higher_tf_trend)
-            return _build_phase_result("distribution", sc, details)
-        if (r20 or 0) > 0.01:
-            strength = min(1.0, ((r20 or 0) - 0.01) / 0.02)
-            sc = _clip_score(0.4 + 0.2 * strength)
-            if rsi_val > 70:
-                sc = _clip_score(sc - 0.08)
-            sc = _apply_higher_tf_context("markup", sc, higher_tf_phase, higher_tf_trend)
-            return _build_phase_result("markup", sc, details)
-        if (r20 or 0) < -0.01:
-            strength = min(1.0, (abs(r20 or 0) - 0.01) / 0.02)
-            sc = _clip_score(0.4 + 0.2 * strength)
-            if rsi_val < 30:
-                sc = _clip_score(sc + 0.05)
-            if rsi_bear_div:
-                sc = _clip_score(sc + 0.03)
-            sc = _apply_higher_tf_context("markdown", sc, higher_tf_phase, higher_tf_trend)
-            return _build_phase_result("markdown", sc, details)
-        sc = _apply_higher_tf_context("accumulation", 0.4, higher_tf_phase, higher_tf_trend)
-        return _build_phase_result("accumulation", sc, details)
+    # Контекст старшего ТФ для итогового score
+    final_score = _apply_higher_tf_context(
+        primary, primary_score_raw, higher_tf_phase, higher_tf_trend
+    )
 
-    if (r20 or 0) > 0.02:
-        strength = min(1.0, ((r20 or 0) - 0.02) / 0.05)
-        sc = _clip_score(0.5 + 0.3 * strength)
-        if rsi_val > 70:
-            sc = _clip_score(sc - 0.1)
-        sc = _apply_higher_tf_context("markup", sc, higher_tf_phase, higher_tf_trend)
-        return _build_phase_result("markup", sc, details)
-    if (r20 or 0) < -0.02:
-        strength = min(1.0, (abs(r20 or 0) - 0.02) / 0.05)
-        sc = _clip_score(0.5 + 0.3 * strength)
-        if rsi_val < 30:
-            sc = _clip_score(sc + 0.05)
-        if rsi_bear_div:
-            sc = _clip_score(sc + 0.03)
-        sc = _apply_higher_tf_context("markdown", sc, higher_tf_phase, higher_tf_trend)
-        return _build_phase_result("markdown", sc, details)
-    sc = _apply_higher_tf_context("accumulation", 0.3, higher_tf_phase, higher_tf_trend)
-    return _build_phase_result("accumulation", sc, details)
+    return _build_phase_result(
+        primary,
+        final_score,
+        details,
+        secondary_phase=secondary,
+        secondary_score=secondary_score_raw,
+        score_gap=score_gap_raw,
+    )
 
 
 def get_phase_name_ru(phase: str) -> str:

@@ -25,6 +25,7 @@ from .market_phases import (
     _ema_stack,
     _obv_slope,
     _recent_return,
+    _rsi,
     _structure,
     _trend_strength,
     _volume_ratio,
@@ -35,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 TREND_NAMES_RU = {"up": "Вверх", "down": "Вниз", "flat": "Флэт"}
 REGIME_NAMES_RU = {"trend": "Тренд", "range": "Диапазон", "surge": "Всплеск"}
+MOMENTUM_STATE_RU = {"strong": "Сильный", "fading": "Затухает", "neutral": "Нейтральный"}
+MOMENTUM_DIRECTION_RU = {"bullish": "Бычий", "bearish": "Медвежий", "neutral": "Нейтральный"}
 
 # Адаптация по таймфрейму: короткие ТФ — быстрее реакция, длинные — плавнее (меньше шума).
 # short: 1,3,5,15,30 мин; long: 60,120,240,D,W,M. Конфиг .env по-прежнему имеет приоритет при явной настройке.
@@ -350,3 +353,62 @@ def _build_trend_result(
 def get_trend_name_ru(direction: str) -> str:
     """Русское название тренда по идентификатору."""
     return TREND_NAMES_RU.get(direction, direction)
+
+
+def detect_momentum(
+    candles: list[dict[str, Any]],
+    rsi_period: int = 14,
+    return_bars: int = 5,
+) -> dict[str, Any]:
+    """
+    Состояние импульса: strong / fading / neutral и направление bullish / bearish / neutral.
+
+    strong — RSI и return_5 совпадают по направлению (RSI > 60 и return_5 > 0 или RSI < 40 и return_5 < 0).
+    fading — RSI в экстремуме, но return_5 против (выдох) или RSI в нейтральной зоне 40–60.
+    neutral — иначе.
+
+    Возвращает: momentum_state, momentum_state_ru, momentum_direction, momentum_direction_ru, rsi, return_5, details.
+    """
+    if not candles or len(candles) < max(rsi_period + 1, return_bars + 1):
+        return {
+            "momentum_state": "neutral",
+            "momentum_state_ru": MOMENTUM_STATE_RU["neutral"],
+            "momentum_direction": "neutral",
+            "momentum_direction_ru": MOMENTUM_DIRECTION_RU["neutral"],
+            "rsi": None,
+            "return_5": None,
+            "details": {"reason": "мало данных"},
+        }
+    c = candles[-min(50, len(candles)):]
+    rsi_val = _rsi(c, rsi_period)
+    ret = _recent_return(c, return_bars)
+    rsi_val = rsi_val if rsi_val is not None else 50.0
+    ret = ret if ret is not None else 0.0
+
+    if rsi_val > 55 and ret > 0.005:
+        direction = "bullish"
+    elif rsi_val < 45 and ret < -0.005:
+        direction = "bearish"
+    else:
+        direction = "neutral"
+
+    if rsi_val > 65 and ret > 0.01:
+        state = "strong"
+    elif rsi_val < 35 and ret < -0.01:
+        state = "strong"
+    elif (rsi_val > 60 and ret < -0.005) or (rsi_val < 40 and ret > 0.005):
+        state = "fading"
+    elif 40 <= rsi_val <= 60:
+        state = "neutral"
+    else:
+        state = "strong" if (rsi_val > 60 and ret > 0) or (rsi_val < 40 and ret < 0) else "neutral"
+
+    return {
+        "momentum_state": state,
+        "momentum_state_ru": MOMENTUM_STATE_RU.get(state, state),
+        "momentum_direction": direction,
+        "momentum_direction_ru": MOMENTUM_DIRECTION_RU.get(direction, direction),
+        "rsi": round(rsi_val, 2),
+        "return_5": round(ret, 4),
+        "details": {"rsi": rsi_val, "return_5": ret},
+    }
