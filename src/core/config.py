@@ -46,6 +46,17 @@ class _Settings(BaseSettings):
     TIMEFRAMES: str = "15,60,240"
     KLINE_LIMIT: int = 200
     POLL_INTERVAL_SEC: float = 60.0
+    ORDERBOOK_LIMIT: int = 25  # глубина стакана (bid/ask) для get_orderbook; linear: 1–500
+
+    # --- Order Flow (микроструктура: DOM, T&S, Delta, Sweeps) ---
+    ORDERFLOW_ENABLED: bool = False  # при True в main запускаются OrderbookStream и TradesStream, результат в отчёте
+    ORDERFLOW_WINDOW_SEC: float = 60.0  # окно для T&S и Volume Delta (сек)
+    # websocket-client требует ping_interval > ping_timeout
+    ORDERFLOW_WS_PING_INTERVAL: int = 30  # интервал ping (сек); должен быть больше ping_timeout
+    ORDERFLOW_WS_PING_TIMEOUT: int = 20  # таймаут ожидания pong (сек); меньше ping_interval
+    ORDERFLOW_SAVE_TO_DB: bool = False  # при True метрики Order Flow пишутся в таблицу orderflow_metrics (та же БД)
+    MICROSTRUCTURE_SANDBOX_ENABLED: bool = False  # при True виртуальная торговля по сигналу микроструктуры (песочница)
+    SANDBOX_INITIAL_BALANCE: float = 100.0  # стартовый виртуальный баланс в USD для песочницы микроструктуры
 
     # --- Фазы ---
     PHASE_SCORE_MIN: float = 0.6
@@ -61,6 +72,15 @@ class _Settings(BaseSettings):
     TREND_FLAT_WHEN_RANGE: bool = True  # в боковике (ADX < 20) чаще возвращать flat
     TREND_MIN_GAP_DOWN: float = 0.0     # мин. разрыв для "вниз" (0.10 = строже, меньше ложных down)
     TREND_USE_PROFILES: bool = True     # адаптация по ТФ (short/long): lookback, min_gap, min_gap_down
+    TREND_REGIME_WEIGHTING: bool = True  # учёт режима рынка: в trend — выше вес структуры/EMA, в range — ниже
+    TREND_SURGE_PENALTY: float = 0.0   # в режиме surge умножать bull/bear (0 = выкл; 0.88 = чаще flat)
+    TREND_CONFIRM_UP: bool = False      # для «вверх» требовать подтверждение от +DI/-DI или структуры (True = строже)
+    TREND_LOW_VOLUME_THRESHOLD: float = 0.7   # при volume_ratio ниже — штраф (TREND_LOW_VOLUME_PENALTY)
+    TREND_LOW_VOLUME_PENALTY: float = 0.0    # множитель bull/bear при низком объёме (0 = выкл; 0.9 = чаще flat)
+    TREND_MIN_AGREEMENT: int = 0       # минимум согласований из трёх (структура, EMA, +DI/-DI) для up/down (0 = выкл; 2 = строго)
+
+    # --- Торговые зоны ---
+    TRADING_ZONES_MAX_LEVELS: int = 0  # макс. уровней в выдаче: 0 = все найденные зоны, >0 = топ N по силе
 
     # --- Фильтры входа ---
     VOLUME_MIN_RATIO: float = 0.0
@@ -138,7 +158,13 @@ TREND_MIN_GAP = _settings.TREND_MIN_GAP
 TREND_FLAT_WHEN_RANGE = _settings.TREND_FLAT_WHEN_RANGE
 TREND_MIN_GAP_DOWN = _settings.TREND_MIN_GAP_DOWN
 TREND_USE_PROFILES = _settings.TREND_USE_PROFILES
-TREND_USE_PROFILES = _settings.TREND_USE_PROFILES
+TREND_REGIME_WEIGHTING = _settings.TREND_REGIME_WEIGHTING
+TREND_SURGE_PENALTY = _settings.TREND_SURGE_PENALTY
+TREND_CONFIRM_UP = _settings.TREND_CONFIRM_UP
+TREND_LOW_VOLUME_THRESHOLD = _settings.TREND_LOW_VOLUME_THRESHOLD
+TREND_LOW_VOLUME_PENALTY = _settings.TREND_LOW_VOLUME_PENALTY
+TREND_MIN_AGREEMENT = _settings.TREND_MIN_AGREEMENT
+TRADING_ZONES_MAX_LEVELS = _settings.TRADING_ZONES_MAX_LEVELS
 VOLUME_MIN_RATIO = _settings.VOLUME_MIN_RATIO
 ATR_MAX_RATIO = _settings.ATR_MAX_RATIO
 TF_ALIGN_MIN = _settings.TF_ALIGN_MIN
@@ -149,6 +175,13 @@ ENTRY_SCORE_WEIGHT_PHASE = _settings.ENTRY_SCORE_WEIGHT_PHASE
 ENTRY_SCORE_WEIGHT_TREND = _settings.ENTRY_SCORE_WEIGHT_TREND
 ENTRY_SCORE_WEIGHT_TF_ALIGN = _settings.ENTRY_SCORE_WEIGHT_TF_ALIGN
 CANDLE_QUALITY_MIN_SCORE = _settings.CANDLE_QUALITY_MIN_SCORE
+ORDERFLOW_ENABLED = _settings.ORDERFLOW_ENABLED
+ORDERFLOW_WINDOW_SEC = _settings.ORDERFLOW_WINDOW_SEC
+ORDERFLOW_WS_PING_INTERVAL = _settings.ORDERFLOW_WS_PING_INTERVAL
+ORDERFLOW_WS_PING_TIMEOUT = _settings.ORDERFLOW_WS_PING_TIMEOUT
+ORDERFLOW_SAVE_TO_DB = _settings.ORDERFLOW_SAVE_TO_DB
+MICROSTRUCTURE_SANDBOX_ENABLED = _settings.MICROSTRUCTURE_SANDBOX_ENABLED
+SANDBOX_INITIAL_BALANCE = _settings.SANDBOX_INITIAL_BALANCE
 DATA_SOURCE = _settings.DATA_SOURCE
 SIGNAL_MIN_CONFIDENCE = _settings.SIGNAL_MIN_CONFIDENCE
 EXCHANGE_MAX_RETRIES = _settings.EXCHANGE_MAX_RETRIES

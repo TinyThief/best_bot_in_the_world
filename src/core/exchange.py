@@ -146,26 +146,29 @@ def _is_rate_limit_or_retryable(out: dict | None, exc: Exception | None) -> bool
     return False
 
 
-def _request_kline(session: HTTP, **params: Any) -> dict:
-    """Выполняет get_kline с ретраями при rate limit и сетевых ошибках."""
+def _request_with_retry(session: HTTP, method: str, **params: Any) -> dict:
+    """Выполняет метод API с ретраями при rate limit и сетевых ошибках. method: get_kline, get_orderbook, ..."""
     last_err: Exception | None = None
     last_out: dict | None = None
     for attempt in range(EXCHANGE_MAX_RETRIES):
         try:
-            out = session.get_kline(**params)
+            fn = getattr(session, method, None)
+            if fn is None:
+                raise RuntimeError(f"Unknown method: {method}")
+            out = fn(**params)
             last_out = out
             if out.get("retCode") == 0:
                 return out
             if _is_rate_limit_or_retryable(out, None):
                 wait = EXCHANGE_RETRY_BACKOFF_SEC * (2 ** attempt)
                 logger.warning(
-                    "Bybit API retCode=%s (попытка %s/%s), ждём %.1f с",
-                    out.get("retCode"), attempt + 1, EXCHANGE_MAX_RETRIES, wait,
+                    "Bybit API %s retCode=%s (попытка %s/%s), ждём %.1f с",
+                    method, out.get("retCode"), attempt + 1, EXCHANGE_MAX_RETRIES, wait,
                 )
                 time.sleep(wait)
-                last_err = RuntimeError(f"Bybit get_kline: {out.get('retMsg', out)}")
+                last_err = RuntimeError(f"Bybit {method}: {out.get('retMsg', out)}")
                 continue
-            raise RuntimeError(f"Bybit get_kline error: {out.get('retMsg', out)}")
+            raise RuntimeError(f"Bybit {method} error: {out.get('retMsg', out)}")
         except RuntimeError:
             raise
         except Exception as e:
@@ -173,9 +176,66 @@ def _request_kline(session: HTTP, **params: Any) -> dict:
             if not _is_rate_limit_or_retryable(last_out, e) or attempt >= EXCHANGE_MAX_RETRIES - 1:
                 raise
             wait = EXCHANGE_RETRY_BACKOFF_SEC * (2 ** attempt)
-            logger.warning("Bybit запрос ошибка (попытка %s/%s): %s, ждём %.1f с", attempt + 1, EXCHANGE_MAX_RETRIES, e, wait)
+            logger.warning("Bybit %s ошибка (попытка %s/%s): %s, ждём %.1f с", method, attempt + 1, EXCHANGE_MAX_RETRIES, e, wait)
             time.sleep(wait)
-    raise last_err or RuntimeError("Bybit get_kline: retries exceeded")
+    raise last_err or RuntimeError(f"Bybit {method}: retries exceeded")
+
+
+def _request_kline(session: HTTP, **params: Any) -> dict:
+    """Выполняет get_kline с ретраями при rate limit и сетевых ошибках."""
+    return _request_with_retry(session, "get_kline", **params)
+
+
+def get_orderbook(
+    symbol: str | None = None,
+    category: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """
+    Загружает снимок стакана (order book) по паре.
+    REST snapshot. Для стакана в реальном времени используйте orderbook_ws.OrderbookStream.
+
+    Возвращает: bids [[price, size], ...] (по убыванию цены), asks [[price, size], ...] (по возрастанию),
+    ts (мс), u (update id), seq (cross sequence), symbol.
+    """
+    symbol = symbol or config.SYMBOL
+    category = category or config.BYBIT_CATEGORY
+    limit = limit or config.ORDERBOOK_LIMIT
+    symbol = (symbol or "").strip().upper()
+    # linear/inverse: limit 1–500
+    limit = max(1, min(500, limit))
+
+    session = _session()
+    out = _request_with_retry(
+        session,
+        "get_orderbook",
+        category=category,
+        symbol=symbol,
+        limit=limit,
+    )
+    r = out.get("result", {})
+    bids_raw = r.get("b") or []
+    asks_raw = r.get("a") or []
+
+    def _parse_levels(arr: list) -> list[list[float]]:
+        out_list: list[list[float]] = []
+        for item in arr:
+            try:
+                price = float(item[0])
+                size = float(item[1])
+                out_list.append([price, size])
+            except (IndexError, TypeError, ValueError):
+                continue
+        return out_list
+
+    return {
+        "symbol": r.get("s", symbol),
+        "bids": _parse_levels(bids_raw),
+        "asks": _parse_levels(asks_raw),
+        "ts": int(r.get("ts", 0)),
+        "u": int(r.get("u", 0)),
+        "seq": int(r.get("seq", 0)),
+    }
 
 
 def get_klines(

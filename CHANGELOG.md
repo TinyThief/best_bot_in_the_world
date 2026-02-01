@@ -10,6 +10,25 @@
 
 ---
 
+## [2.8.0] — 2026-02-01
+
+Order Flow, песочница микроструктуры, команда /sandbox в Telegram, таймауты WebSocket Bybit.
+
+### Добавлено
+
+- **Order Flow и песочница микроструктуры:** модуль `src/analysis/orderflow.py` (DOM, T&S, Volume Delta, Sweeps); потоки `OrderbookStream`, `TradesStream`; `src/analysis/microstructure_signal.py` — сигнал по микроструктуре; `MicrostructureSandbox` — виртуальная торговля по сигналу; состояние в `sandbox_state` для Telegram. Конфиг: ORDERFLOW_ENABLED, MICROSTRUCTURE_SANDBOX_ENABLED, SANDBOX_INITIAL_BALANCE, ORDERFLOW_WINDOW_SEC, ORDERFLOW_SAVE_TO_DB.
+- **Telegram /sandbox:** команда и обработчик (регистрация `CommandHandler("sandbox", cmd_sandbox)`); отображение позиции, PnL, эквити песочницы; inline-кнопки Песочница и Обновить; гарантированный ответ при ошибках и таймаутах.
+- **Таймауты Telegram API:** в Application.builder() заданы read_timeout=15, write_timeout=15, connect_timeout=10; в cmd_sandbox — таймауты на reply/edit/send, fallback-сообщения при сбоях.
+- **WebSocket Bybit (Order Flow):** параметры ORDERFLOW_WS_PING_INTERVAL и ORDERFLOW_WS_PING_TIMEOUT (ping_interval > ping_timeout для websocket-client); по умолчанию 30 и 20 сек — меньше обрывов «ping/pong timed out» и соблюдение «Ensure ping_interval > ping_timeout».
+
+### Изменено
+
+- **main.py:** при ORDERFLOW_ENABLED запускаются OrderbookStream и TradesStream; при MICROSTRUCTURE_SANDBOX_ENABLED — MicrostructureSandbox, итог пишется в logs/sandbox_result.txt при остановке.
+- **bot_loop:** интеграция Order Flow и песочницы (report["orderflow"], report["microstructure_sandbox"]), запись состояния в sandbox_state.
+- **.env.example:** добавлены ORDERFLOW_*, MICROSTRUCTURE_SANDBOX_*, SANDBOX_INITIAL_BALANCE, ORDERFLOW_WS_PING_*.
+
+---
+
 ## [2.7.0] — 2026-01-31
 
 ### Добавлено

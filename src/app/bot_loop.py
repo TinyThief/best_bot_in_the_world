@@ -1,6 +1,7 @@
 """
 Один тик цикла торгового бота: обновление БД (если пора) + мультиТФ-анализ + лог результата.
 Используется из main.py — там только цикл и пауза, вся логика «что делать за шаг» здесь.
+При ORDERFLOW_ENABLED и переданных orderbook_stream/trades_stream добавляется анализ Order Flow (DOM, T&S, Delta, Sweeps).
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import time
 from typing import Any
 
 from ..analysis.multi_tf import analyze_multi_timeframe
+from ..core import config
 from .db_sync import refresh_if_due
 
 logger = logging.getLogger(__name__)
@@ -137,6 +139,33 @@ def _log_report(report: dict[str, Any]) -> None:
         candle_quality_ok,
         higher_tf_quality if higher_tf_quality is not None else "—",
     )
+    # Order Flow (DOM, T&S, Delta, Sweeps) — при наличии
+    of = report.get("orderflow") or {}
+    if of:
+        dom = of.get("dom") or {}
+        delta = of.get("volume_delta") or {}
+        sweeps = of.get("sweeps") or {}
+        logger.info(
+            "  Order Flow: DOM imbalance=%.2f | delta=%.2f (ratio=%.2f) | last_sweep=%s @ %s",
+            dom.get("imbalance_ratio", 0.5),
+            delta.get("delta", 0.0),
+            delta.get("delta_ratio", 0.0),
+            sweeps.get("last_sweep_side") or "—",
+            sweeps.get("last_sweep_time") or "—",
+        )
+    # Песочница микроструктуры (виртуальная позиция и PnL)
+    sandbox_state = report.get("microstructure_sandbox")
+    if sandbox_state:
+        logger.info(
+            "  Песочница микроструктуры: позиция=%s | entry=%.2f | realized=$%.2f | unrealized=$%.2f | эквити=$%.2f | сигнал=%s (%.2f)",
+            sandbox_state.get("position_side", "—"),
+            sandbox_state.get("entry_price", 0),
+            sandbox_state.get("total_realized_pnl", 0),
+            sandbox_state.get("unrealized_pnl", 0),
+            sandbox_state.get("equity_usd", 0),
+            sandbox_state.get("last_signal_direction", "—"),
+            sandbox_state.get("last_signal_confidence", 0),
+        )
     # Компактная строка в signals.log для разбора и статистики
     try:
         from ..core.logging_config import get_signals_logger
@@ -149,12 +178,79 @@ def _log_report(report: dict[str, Any]) -> None:
         pass
 
 
-def run_one_tick(db_conn: sqlite3.Connection | None, last_db_ts: float) -> float:
+def _orderflow_candles_for_sweep(db_conn: sqlite3.Connection | None, lookback_bars: int = 10) -> list[dict[str, Any]]:
+    """Последние lookback_bars свечей по младшему ТФ из TIMEFRAMES_DB для detect_sweeps. Порядок: от старых к новым."""
+    if not db_conn or not config.TIMEFRAMES_DB:
+        return []
+    try:
+        from ..core.database import get_candles
+        # Младший ТФ — первый в списке (1, 3, 5, 15, ...)
+        min_tf = config.TIMEFRAMES_DB[0]
+        cursor = db_conn.cursor()
+        rows = get_candles(cursor, config.SYMBOL, min_tf, limit=lookback_bars, order_asc=False)
+        return list(reversed(rows))  # от старых к новым
+    except Exception:
+        return []
+
+
+def run_one_tick(
+    db_conn: sqlite3.Connection | None,
+    last_db_ts: float,
+    *,
+    orderbook_stream: Any = None,
+    trades_stream: Any = None,
+    microstructure_sandbox: Any = None,
+) -> float:
     """
     Один проход цикла: обновить БД по таймеру, выполнить анализ, залогировать.
+    При ORDERFLOW_ENABLED и переданных orderbook_stream/trades_stream добавляется Order Flow (DOM, T&S, Delta, Sweeps).
+    При microstructure_sandbox — обновляется виртуальная позиция по сигналу микроструктуры, результат в report.
     Возвращает актуальную метку времени последнего обновления БД.
     """
     last_db_ts = refresh_if_due(db_conn, last_db_ts)
     report = analyze_multi_timeframe(db_conn=db_conn)
+
+    if getattr(config, "ORDERFLOW_ENABLED", False) and (orderbook_stream or trades_stream):
+        try:
+            from ..analysis.orderflow import analyze_orderflow
+            from .microstructure_sandbox import _mid_from_snapshot
+            orderbook_snapshot = orderbook_stream.get_snapshot() if orderbook_stream else None
+            window_sec = getattr(config, "ORDERFLOW_WINDOW_SEC", 60.0)
+            now_ms = int(time.time() * 1000)
+            recent_trades = (
+                trades_stream.get_recent_trades_since(now_ms - int(window_sec * 1000))
+                if trades_stream
+                else []
+            )
+            candles_for_sweep = _orderflow_candles_for_sweep(db_conn, lookback_bars=10)
+            of_result = analyze_orderflow(
+                orderbook_snapshot=orderbook_snapshot,
+                recent_trades=recent_trades if recent_trades else None,
+                candles=candles_for_sweep if candles_for_sweep else None,
+                window_sec=window_sec,
+            )
+            report["orderflow"] = of_result
+            if getattr(config, "ORDERFLOW_SAVE_TO_DB", False) and db_conn and of_result:
+                try:
+                    from ..core.database import insert_orderflow_metrics
+                    cur = db_conn.cursor()
+                    insert_orderflow_metrics(cur, config.SYMBOL, int(time.time()), of_result)
+                    db_conn.commit()
+                except Exception as e:
+                    logger.debug("Order Flow запись в БД пропущена: %s", e)
+            # Песочница микроструктуры: виртуальная позиция и PnL по сигналу
+            if microstructure_sandbox is not None and orderbook_snapshot and of_result:
+                mid = _mid_from_snapshot(orderbook_snapshot)
+                if mid is not None:
+                    try:
+                        state = microstructure_sandbox.update(of_result, mid, int(time.time()))
+                        report["microstructure_sandbox"] = state
+                        from . import sandbox_state
+                        sandbox_state.set_last_state(state)
+                    except Exception as e:
+                        logger.debug("Песочница микроструктуры пропущена: %s", e)
+        except Exception as e:
+            logger.debug("Order Flow анализ пропущен: %s", e)
+
     _log_report(report)
     return last_db_ts

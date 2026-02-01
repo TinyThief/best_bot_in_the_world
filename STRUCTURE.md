@@ -23,7 +23,8 @@ best_bot_in_the_world/
 │   ├── accumulate_db.py # Накопление БД в цикле (бэкфилл + периодическое обновление)
 │   ├── full_backfill.py # Полный бэкфилл без удаления файла (--clear, --extend)
 │   ├── backtest_phases.py   # Бэктест точности фаз по БД
-│   ├── backtest_trend.py    # Бэктест точности модуля тренда
+│   ├── backtest_trend.py   # Бэктест точности модуля тренда
+│   ├── backtest_trade_2025.py  # Бэктест сценария управления сделкой за год (один ТФ или --all-tf)
 │   ├── compare_phase_methods.py  # Сравнение трёх методов фаз (Wyckoff / Indicators / PA)
 │   ├── test_run_once.py    # Один прогон мультиТФ-анализа (без цикла)
 │   ├── trend_daily_full.py # Тренд по всей БД ТФ D с визуализацией
@@ -49,7 +50,7 @@ best_bot_in_the_world/
 ├── src/                 # Исходный код
 │   ├── core/            # Инфраструктура
 │   │   ├── config.py    # Конфиг из .env
-│   │   ├── database.py  # SQLite, klines
+│   │   ├── database.py  # SQLite, klines + orderflow_metrics (метрики микроструктуры)
 │   │   ├── db_helper.py # Умные выборки, кэш, дозаполнение пропусков
 │   │   ├── exchange.py  # Bybit API (свечи, фильтр OHLC)
 │   │   └── logging_config.py
@@ -63,25 +64,27 @@ best_bot_in_the_world/
 │   │   ├── main.py      # Цикл бота, db_sync, опционально Telegram
 │   │   ├── bot_loop.py  # Один тик: обновление БД + анализ + лог
 │   │   ├── db_sync.py   # Подготовка БД, refresh_if_due
-│   │   └── telegram_bot.py    # Команды /signal, /zones, /momentum, /health, /chart; inline Сигнал|Зоны|Импульс; алерт при смене сигнала
+│   │   └── telegram_bot.py    # Команды /signal, /zones, /momentum, /health, /chart, /trend_backtest, /trade_2025; inline Сигнал|Зоны|Импульс; алерт при смене сигнала
 │   ├── scripts/         # Скрипты (логика; точки входа — bin/)
 │   │   ├── accumulate_db.py
 │   │   ├── full_backfill.py
 │   │   ├── refill_tf_d.py
-│   │   ├── backtest_phases.py, backtest_trend.py
+│   │   ├── backtest_phases.py, backtest_trend.py, backtest_trade_2025.py
 │   │   ├── compare_phase_methods.py
 │   │   ├── trend_daily_full.py, trend_backtest_report.py
 │   │   ├── test_run_once.py, test_zones.py
 │   │   └── README.md          # Список команд bin/
 │   └── utils/           # Утилиты
-│       ├── backtest_chart.py  # Графики (фазы, тренд, свечной /chart)
+│       ├── backtest_chart.py  # Графики (фазы, тренд, свечной /chart, бэктест по ТФ за год /trade_2025)
+│       ├── backtest_engine.py # Движок бэктеста с TP/SL (run_backtest)
+│       ├── tp_sl.py           # TP/SL: Fixed, ATR, TrailingStop, ATRTrailing
 │       ├── candle_quality.py
 │       ├── helpers.py
 │       └── validators.py
 │
 ├── strategies/          # Заготовка под стратегии (пока пусто)
 ├── tests/               # unit/, integration/, backtest/
-├── data/                # klines.db (в .gitignore)
+├── data/                # klines.db (klines + orderflow_metrics, в .gitignore)
 └── logs/                # bot.log, signals.log (в .gitignore)
 ```
 
@@ -121,10 +124,11 @@ best_bot_in_the_world/
 |----------|------|---------|
 | Бэктест точности фаз | `bin/backtest_phases.py` | `python bin/backtest_phases.py [--tf 60] [--bars N] [--tune]` |
 | Бэктест точности тренда | `bin/backtest_trend.py` | `python bin/backtest_trend.py` |
+| Бэктест сценария управления сделкой за год (сигнал + TP/SL) | `bin/backtest_trade_2025.py` | `python bin/backtest_trade_2025.py [--year 2025] [--tf 60]` или `--all-tf` |
 | Сравнение методов фаз (Wyckoff / Indicators / PA) | `bin/compare_phase_methods.py` | `python bin/compare_phase_methods.py` |
 | Один прогон анализа (без цикла) | `bin/test_run_once.py` | `python bin/test_run_once.py` |
 
-Логика — в `src/scripts/backtest_phases.py`, `src/scripts/backtest_trend.py`, `src/scripts/compare_phase_methods.py`, `src/scripts/test_run_once.py`.
+Логика — в `src/scripts/backtest_phases.py`, `src/scripts/backtest_trend.py`, `src/scripts/backtest_trade_2025.py`, `src/scripts/compare_phase_methods.py`, `src/scripts/test_run_once.py`.
 
 ---
 
@@ -177,8 +181,10 @@ best_bot_in_the_world/
 | Сигнал long/short/none, мультиТФ | `src/analysis/multi_tf.py` |
 | Цикл бота, один тик | `src/app/main.py`, `src/app/bot_loop.py` |
 | Подготовка БД, обновление по таймеру | `src/app/db_sync.py` |
-| Команды Telegram, /chart | `src/app/telegram_bot.py` |
+| Команды Telegram, /chart, /trade_2025 | `src/app/telegram_bot.py` |
 | Накопление БД, дозаполнение пропусков | `src/scripts/accumulate_db.py` |
-| Графики (фазы, тренд, свечной) | `src/utils/backtest_chart.py` |
+| Бэктест по ТФ за год (run_all_tf_for_chart) | `src/scripts/backtest_trade_2025.py` |
+| Графики (фазы, тренд, свечной, бэктест по ТФ за год) | `src/utils/backtest_chart.py` |
+| Движок бэктеста с TP/SL | `src/utils/backtest_engine.py`, `src/utils/tp_sl.py` |
 
 После изменений имеет смысл запускать `python check_all.py` (при необходимости с `--quick` или `-v`).

@@ -140,6 +140,15 @@ def detect_trend(
         lookback_eff = min(max(lookback, 200), len(candles))
     c = candles[-lookback_eff:]
 
+    # Режим рынка: в trend — больше доверия структуре/EMA, в range — меньше (чаще flat)
+    use_regime_weighting = getattr(config, "TREND_REGIME_WEIGHTING", True)
+    regime_info = detect_regime(c, lookback=50)
+    regime = regime_info.get("regime") or "range"
+    REGIME_WEIGHT_STRUCTURE = {"trend": 1.25, "range": 0.70, "surge": 1.0}
+    REGIME_WEIGHT_EMA = {"trend": 1.25, "range": 0.70, "surge": 1.0}
+    w_struct = REGIME_WEIGHT_STRUCTURE.get(regime, 1.0) if use_regime_weighting else 1.0
+    w_ema = REGIME_WEIGHT_EMA.get(regime, 1.0) if use_regime_weighting else 1.0
+
     structure = _structure(c, pivots=5)
     ema_stack = _ema_stack(c)
     adx_val, plus_di, minus_di = _adx(c, 14)
@@ -150,6 +159,8 @@ def detect_trend(
     ret_20 = _recent_return(c, min(20, len(c) - 1))
 
     details = {
+        "regime": regime,
+        "regime_ru": regime_info.get("regime_ru"),
         "structure": structure,
         "ema_trend": ema_stack.get("ema_trend"),
         "ema20": round(ema_stack["ema20"], 4) if ema_stack.get("ema20") is not None else None,
@@ -172,18 +183,18 @@ def detect_trend(
     bull = 0.0
     bear = 0.0
 
-    # Структура: up = +0.2 bull, down = +0.2 bear
+    # Структура: up = +0.2 bull, down = +0.2 bear (вес зависит от режима: trend — выше, range — ниже)
     if structure == "up":
-        bull += 0.2
+        bull += 0.2 * w_struct
     elif structure == "down":
-        bear += 0.2
+        bear += 0.2 * w_struct
 
-    # EMA-стек
+    # EMA-стек (вес зависит от режима)
     ema_trend = ema_stack.get("ema_trend")
     if ema_trend == "bullish":
-        bull += 0.18
+        bull += 0.18 * w_ema
     elif ema_trend == "bearish":
-        bear += 0.18
+        bear += 0.18 * w_ema
 
     # ADX: сила тренда; +DI/-DI — направление
     adx = adx_val if adx_val is not None else 0.0
@@ -247,6 +258,18 @@ def detect_trend(
             bull += bonus
         elif bear > bull:
             bear += bonus
+    # Низкий объём: меньше доверия тренду — слегка снижаем обе стороны (чаще flat)
+    low_vol_threshold = getattr(config, "TREND_LOW_VOLUME_THRESHOLD", 0.7)
+    low_vol_penalty = getattr(config, "TREND_LOW_VOLUME_PENALTY", 0.9)
+    if low_vol_penalty > 0 and low_vol_penalty < 1.0 and vr < low_vol_threshold:
+        bull *= low_vol_penalty
+        bear *= low_vol_penalty
+
+    # Surge: в всплеске волатильности снижаем доверие к тренду — чаще flat
+    surge_penalty = getattr(config, "TREND_SURGE_PENALTY", 0.88)
+    if regime == "surge" and surge_penalty > 0 and surge_penalty < 1.0:
+        bull *= surge_penalty
+        bear *= surge_penalty
 
     # Нормализуем суммы в 0..1 (каждая группа уже ограничена по смыслу)
     bull = min(1.0, bull)
@@ -254,10 +277,19 @@ def detect_trend(
 
     # Направление: у кого больше очков и выше порога
     flat_threshold = 0.25
+    confirm_up = getattr(config, "TREND_CONFIRM_UP", True)  # требовать подтверждение для «вверх» (как для «вниз»)
     if bull > bear and bull >= flat_threshold:
         direction = "up"
         strength = bull
         secondary_strength = bear
+        # Подтверждение «вверх»: хотя бы ADX (+DI/-DI) или структура согласны (меньше ложных up)
+        if confirm_up:
+            di_bull = plus_di is not None and minus_di is not None and plus_di > minus_di
+            struct_bull = structure == "up"
+            if not (di_bull or struct_bull):
+                direction = "flat"
+                strength = max(bull, bear)
+                secondary_strength = min(bull, bear)
     elif bear > bull and bear >= flat_threshold:
         # Строже для "вниз": требуем больший разрыв (меньше ложных down)
         gap_down = bear - bull
@@ -284,6 +316,22 @@ def detect_trend(
     # В боковике (ADX < 20) чаще возвращаем flat, если тренд не очень выражен
     if flat_when_range and adx < 20 and direction in ("up", "down"):
         if strength < 0.5 or (strength - secondary_strength) < 0.12:
+            direction = "flat"
+            strength = max(bull, bear)
+            secondary_strength = min(bull, bear)
+
+    # Минимум согласований: для up/down требуем хотя бы N из трёх (структура, EMA, +DI/-DI) в ту же сторону
+    min_agreement = getattr(config, "TREND_MIN_AGREEMENT", 2)
+    if min_agreement >= 1 and direction in ("up", "down"):
+        struct_agree = (structure == "up" and direction == "up") or (structure == "down" and direction == "down")
+        ema_agree = (ema_trend == "bullish" and direction == "up") or (ema_trend == "bearish" and direction == "down")
+        di_agree = (
+            plus_di is not None
+            and minus_di is not None
+            and ((direction == "up" and plus_di > minus_di) or (direction == "down" and minus_di > plus_di))
+        )
+        agreements = sum([struct_agree, ema_agree, di_agree])
+        if agreements < min_agreement:
             direction = "flat"
             strength = max(bull, bear)
             secondary_strength = min(bull, bear)

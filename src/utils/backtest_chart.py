@@ -4,6 +4,7 @@
 - build_phases_chart / build_trend_chart: столбчатые графики точности по фазам/направлениям.
 - build_candlestick_trend_chart: свечной график из БД с зонами трендов (Вверх / Вниз / Флэт) по detect_trend.
 - build_candlestick_phase_chart: свечной график с зонами 6 фаз рынка (Накопление, Рост, Распределение, Падение, Капитуляция, Восстановление) по detect_phase.
+- build_candlestick_zones_chart: свечной график по всей БД ТФ D с уровнями поддержки/сопротивления (detect_trading_zones).
 Возвращает PNG в BytesIO для отправки фото в Telegram.
 """
 from __future__ import annotations
@@ -184,6 +185,84 @@ def build_trend_chart(data: dict[str, Any], dpi: int = 120) -> io.BytesIO:
     return buf
 
 
+def _format_equity(val: float) -> str:
+    """Форматирует итог капитала для подписи: 62.71, 1.8k, 461M, 1.2B."""
+    if val >= 1e9:
+        return f"{val / 1e9:.1f}B"
+    if val >= 1e6:
+        return f"{val / 1e6:.1f}M"
+    if val >= 1e3:
+        return f"{val / 1e3:.1f}k"
+    return f"{val:.2f}"
+
+
+def build_trade_2025_chart(
+    results: list[dict[str, Any]],
+    year: int = 2025,
+    initial_deposit: float = 100.0,
+    dpi: int = 120,
+) -> tuple[io.BytesIO, str]:
+    """
+    Строит график бэктеста сценария управления сделкой по всем ТФ за год.
+
+    results: список из backtest_trade_2025.run_all_tf_for_chart() (timeframe, final_equity, n_trades, max_drawdown_pct, ...).
+    Возвращает (BytesIO с PNG, caption для Telegram): старт $100, по каждому ТФ — итог в конце года и PnL%.
+    """
+    if not results:
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=dpi)
+        ax.text(0.5, 0.5, "Нет данных за год", ha="center", va="center", fontsize=14)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+        plt.close(fig)
+        buf.seek(0)
+        return buf, f"Бэктест за {year}: нет результатов."
+
+    symbol = results[0].get("symbol", "—")
+    tf_labels = [str(r.get("timeframe", "?")) for r in results]
+    ret_pcts = []
+    for r in results:
+        initial = r.get("initial_deposit", initial_deposit)
+        final = r.get("final_equity", 0)
+        ret_pcts.append((final - initial) / initial * 100 if initial else 0)
+    max_dds = [r.get("max_drawdown_pct", 0) for r in results]
+    colors_ret = ["#2ecc71" if r >= 0 else "#e74c3c" for r in ret_pcts]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), dpi=dpi, gridspec_kw={"height_ratios": [1.2, 1]})
+    x = range(len(tf_labels))
+
+    bars1 = ax1.bar(x, ret_pcts, color=colors_ret, edgecolor="black", linewidth=0.5)
+    ax1.axhline(y=0, color="black", linewidth=0.5)
+    ax1.set_ylabel("Доходность (%)")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(tf_labels, rotation=0)
+    ax1.set_title(f"Бэктест по ТФ за {year}  |  {symbol}  |  Старт: ${initial_deposit:.0f}")
+    ax1.grid(axis="y", alpha=0.3)
+    for bar, val in zip(bars1, ret_pcts):
+        ax1.text(bar.get_x() + bar.get_width() / 2, val + (2 if val >= 0 else -4), f"{val:+.0f}%", ha="center", va="bottom" if val >= 0 else "top", fontsize=8, fontweight="bold")
+
+    ax2.bar(x, max_dds, color="#e67e22", edgecolor="black", linewidth=0.5, alpha=0.8)
+    ax2.set_ylabel("Макс. просадка (%)")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(tf_labels, rotation=0)
+    ax2.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+    plt.close(fig)
+    buf.seek(0)
+
+    lines = [f"Старт года: ${initial_deposit:.0f}. Итог по ТФ:"]
+    for r in results:
+        tf = r.get("timeframe", "?")
+        final = r.get("final_equity", 0)
+        ret = (final - initial_deposit) / initial_deposit * 100 if initial_deposit else 0
+        lines.append(f"ТФ {tf}: ${_format_equity(final)} ({ret:+.1f}%)")
+    caption = "\n".join(lines)
+    return buf, caption[:1024]
+
+
 # Цвета трендов на свечном графике: Вверх / Вниз / Флэт
 TREND_CHART_COLORS = {
     "up": "#2ecc71",    # зелёный — тренд вверх
@@ -312,6 +391,27 @@ def _shift_trend_ranges(
     return out
 
 
+def _smooth_trend_ranges(
+    trend_ranges: dict[str, list[tuple[int, int]]],
+    min_bars: int = 5,
+) -> dict[str, list[tuple[int, int]]]:
+    """
+    Короткие зоны up/down (короче min_bars) переводим в flat — меньше визуального шума.
+    Длинные зоны не трогаем.
+    """
+    if min_bars < 2:
+        return trend_ranges
+    out: dict[str, list[tuple[int, int]]] = {"up": [], "down": [], "flat": []}
+    out["flat"] = list(trend_ranges.get("flat", []))
+    for direction in ("up", "down"):
+        for (i0, i1) in trend_ranges.get(direction, []):
+            if (i1 - i0 + 1) >= min_bars:
+                out[direction].append((i0, i1))
+            else:
+                out["flat"].append((i0, i1))
+    return out
+
+
 def build_daily_trend_full_chart(
     candles: list[dict[str, Any]],
     symbol: str,
@@ -320,6 +420,8 @@ def build_daily_trend_full_chart(
     max_candles_display: int = 2000,
     dpi: int = 120,
     figsize: tuple[float, float] = (14, 7),
+    min_trend_bars: int = 1,
+    trend_band_alpha: float = 0.18,
 ) -> io.BytesIO:
     """
     Тренд по всей БД на таймфрейме D: загрузи все D-свечи, посчитай тренд на полной истории,
@@ -366,6 +468,8 @@ def build_daily_trend_full_chart(
 
     n_full = len(candles)
     trend_ranges_full = _compute_trend_ranges(candles, lookback, timeframe)
+    if min_trend_bars >= 2:
+        trend_ranges_full = _smooth_trend_ranges(trend_ranges_full, min_bars=min_trend_bars)
     display_n = min(n_full, max_candles_display)
     display_candles = candles[-display_n:]
     offset = n_full - display_n
@@ -391,7 +495,7 @@ def build_daily_trend_full_chart(
     for direction in ("up", "down", "flat"):
         color = TREND_CHART_COLORS.get(direction, "#95a5a6")
         for (i0, i1) in trend_ranges.get(direction, []):
-            ax.axvspan(i0 - 0.5, i1 + 0.5, facecolor=color, alpha=0.25)
+            ax.axvspan(i0 - 0.5, i1 + 0.5, facecolor=color, alpha=trend_band_alpha)
 
     min_body_height = (y_max_glob - y_min_glob) * 0.0005
     width = min(0.85, 0.5 + 300.0 / max(n, 1))
@@ -459,14 +563,294 @@ def build_daily_trend_full_chart(
     )
 
     legend_handles = [
-        mpatches.Patch(color=TREND_CHART_COLORS["up"], alpha=0.25, label=TREND_NAMES_RU_CHART["up"]),
-        mpatches.Patch(color=TREND_CHART_COLORS["down"], alpha=0.25, label=TREND_NAMES_RU_CHART["down"]),
-        mpatches.Patch(color=TREND_CHART_COLORS["flat"], alpha=0.25, label=TREND_NAMES_RU_CHART["flat"]),
+        mpatches.Patch(color=TREND_CHART_COLORS["up"], alpha=trend_band_alpha, label=TREND_NAMES_RU_CHART["up"]),
+        mpatches.Patch(color=TREND_CHART_COLORS["down"], alpha=trend_band_alpha, label=TREND_NAMES_RU_CHART["down"]),
+        mpatches.Patch(color=TREND_CHART_COLORS["flat"], alpha=trend_band_alpha, label=TREND_NAMES_RU_CHART["flat"]),
     ]
     ax.legend(handles=legend_handles, loc="upper right", fontsize=9)
 
     title_n = f"последние {n} из {n_full} свечей (тренд по всей БД)" if n_full > n else f"{n} свечей, тренд по всей БД"
     ax.set_title(f"{symbol}  |  ТФ {timeframe}  |  {title_n}  |  Вверх / Вниз / Флэт")
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+# Цвета уровней торговых зон
+ZONES_SUPPORT_COLOR = "#27ae60"
+ZONES_RESISTANCE_COLOR = "#e74c3c"
+
+
+def build_candlestick_zones_chart(
+    candles: list[dict[str, Any]],
+    symbol: str,
+    *,
+    max_candles_display: int = 2000,
+    max_levels: int | None = 12,
+    max_levels_draw: int = 24,
+    dpi: int = 120,
+    figsize: tuple[float, float] = (14, 7),
+    timeframe_label: str = "D",
+) -> io.BytesIO:
+    """
+    Торговые зоны: свечной график + горизонтальные уровни поддержки/сопротивления.
+
+    candles: свечи (от старых к новым). Уровни считаются по последним max_candles_display свечам.
+    symbol: пара для заголовка и фильтра цен.
+    max_levels: макс. уровней при расчёте (None = все найденные).
+    max_levels_draw: макс. уровней на графике (по силе).
+    timeframe_label: подпись таймфрейма для заголовка (например "D" или "1 ч").
+    Возвращает BytesIO с PNG.
+    """
+    from ..analysis.trading_zones import CURRENT_RESISTANCE, CURRENT_SUPPORT, detect_trading_zones
+
+    min_candles = 50
+    if not candles or len(candles) < min_candles:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+        ax.text(0.5, 0.5, "Недостаточно свечей для графика зон (нужно минимум %s)" % min_candles, ha="center", va="center", fontsize=14)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    if "BTC" in symbol.upper():
+        price_lo, price_hi = 1_000.0, 150_000.0
+        max_range_ratio = 0.30
+        filtered = []
+        for c in candles:
+            o = float(c.get("open", 0) or 0)
+            h = float(c.get("high", 0) or 0)
+            l_ = float(c.get("low", 0) or 0)
+            cl = float(c.get("close", 0) or 0)
+            if o <= 0:
+                continue
+            mn, mx = min(o, h, l_, cl), max(o, h, l_, cl)
+            if mn < price_lo or mx > price_hi:
+                continue
+            if (h - l_) / o > max_range_ratio:
+                continue
+            filtered.append(c)
+        if len(filtered) >= min_candles:
+            candles = filtered
+
+    n_full = len(candles)
+    display_n = min(n_full, max_candles_display)
+    display_candles = candles[-display_n:]
+    n = len(display_candles)
+
+    zones = detect_trading_zones(display_candles, max_levels=max_levels)
+    levels = (zones.get("levels") or [])[:max_levels_draw]
+
+    opens = np.array([c["open"] for c in display_candles], dtype=float)
+    highs = np.array([c["high"] for c in display_candles], dtype=float)
+    lows = np.array([c["low"] for c in display_candles], dtype=float)
+    closes = np.array([c["close"] for c in display_candles], dtype=float)
+
+    fig_w = min(28.0, max(figsize[0], 12.0 + n * 0.012))
+    fig_h = figsize[1]
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+    ax.set_facecolor("white")
+    fig.patch.set_facecolor("white")
+    ax.grid(True, alpha=0.3, linestyle="-")
+    ax.set_axisbelow(True)
+
+    y_min_glob = float(min(lows.min(), opens.min(), closes.min()))
+    y_max_glob = float(max(highs.max(), opens.max(), closes.max()))
+
+    # Текущая зона (коридор между ближайшей поддержкой и сопротивлением) — заливка
+    z_low = zones.get("zone_low")
+    z_high = zones.get("zone_high")
+    if z_low is not None and z_high is not None and z_low < z_high:
+        ax.axhspan(z_low, z_high, facecolor="#3498db", alpha=0.14, zorder=0)
+
+    for lev in levels:
+        price = float(lev.get("price") or 0)
+        if price <= 0:
+            continue
+        role = lev.get("current_role") or ""
+        color = ZONES_SUPPORT_COLOR if role == CURRENT_SUPPORT else ZONES_RESISTANCE_COLOR
+        ax.axhline(price, color=color, linestyle="--", linewidth=0.9, alpha=0.7)
+
+    min_body_height = (y_max_glob - y_min_glob) * 0.0005
+    width = min(0.85, 0.5 + 300.0 / max(n, 1))
+    wick_lw = 1.0
+    for i in range(n):
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        color = CANDLE_COLOR_UP if c >= o else CANDLE_COLOR_DOWN
+        body_bottom = min(o, c)
+        body_top_real = max(o, c)
+        body_height_real = body_top_real - body_bottom
+        body_height_draw = max(body_height_real, min_body_height)
+        body_top_draw = body_bottom + body_height_draw
+        if l < body_bottom - 1e-9:
+            ax.plot([i, i], [l, body_bottom], color=color, linewidth=wick_lw, solid_capstyle="round")
+        if h > body_top_draw + 1e-9:
+            ax.plot([i, i], [body_top_draw, h], color=color, linewidth=wick_lw, solid_capstyle="round")
+        rect = plt.Rectangle(
+            (i - width / 2, body_bottom),
+            width,
+            body_height_draw,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.6,
+        )
+        ax.add_patch(rect)
+
+    ax.set_xlim(-0.5, n - 0.5)
+    ax.set_ylim(y_min_glob - (y_max_glob - y_min_glob) * 0.01, y_max_glob + (y_max_glob - y_min_glob) * 0.01)
+    ax.set_ylabel("Цена (USDT)")
+    ax.set_xlabel("Дата")
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f}"))
+
+    step_ticks = max(1, n // 12)
+    tick_indices = list(range(0, n, step_ticks))
+    if n - 1 not in tick_indices:
+        tick_indices.append(n - 1)
+    ax.set_xticks(tick_indices)
+    ts_div = 1000 if (display_candles[0]["start_time"] > 1e10) else 1
+    date_fmt = "%d %b" if n > 500 else "%b %Y"
+    ax.set_xticklabels(
+        [
+            datetime.utcfromtimestamp(display_candles[i]["start_time"] / ts_div).strftime(date_fmt)
+            for i in tick_indices
+        ],
+        rotation=25,
+        ha="right",
+    )
+
+    last_ts = display_candles[-1]["start_time"]
+    last_ts_sec = last_ts / 1000 if last_ts > 1e10 else last_ts
+    last_date_str = datetime.utcfromtimestamp(last_ts_sec).strftime("%d.%m.%Y")
+    o, h, l, c = float(opens[-1]), float(highs[-1]), float(lows[-1]), float(closes[-1])
+    change = c - o
+    change_pct = (change / o * 100) if o and o != 0 else 0
+    z_low = zones.get("zone_low")
+    z_high = zones.get("zone_high")
+    in_z = zones.get("in_zone", False)
+    text_box = (
+        f"Последняя свеча: {last_date_str}\n"
+        f"ОТКР {o:,.1f}  МАКС {h:,.1f}\nМИН {l:,.1f}  ЗАКР {c:,.1f}\n"
+        f"Change {change:+,.1f} ({change_pct:+.2f}%)\n"
+    )
+    if z_low is not None and z_high is not None:
+        text_box += f"Зона: {z_low:,.0f} – {z_high:,.0f}\nВ зоне: {'да' if in_z else 'нет'}\n"
+    text_box += f"Диапазон: {y_min_glob:,.0f} – {y_max_glob:,.0f}"
+    ax.text(
+        0.02, 0.98, text_box,
+        transform=ax.transAxes, fontsize=9, verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.9), family="monospace",
+    )
+
+    legend_handles = [
+        mpatches.Patch(color="#3498db", alpha=0.2, label="Текущая зона (коридор S–R)"),
+        mpatches.Patch(color=ZONES_SUPPORT_COLOR, alpha=0.8, label="Поддержка"),
+        mpatches.Patch(color=ZONES_RESISTANCE_COLOR, alpha=0.8, label="Сопротивление"),
+    ]
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=9)
+
+    title_n = f"последние {n} из {n_full} свечей" if n_full > n else f"{n} свечей"
+    ax.set_title(f"{symbol}  |  ТФ {timeframe_label}  |  Торговые зоны (S/R)  |  {title_n}")
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def build_simple_strategy_chart(
+    result: dict[str, Any],
+    dpi: int = 120,
+    strategy_title: str | None = None,
+) -> io.BytesIO:
+    """
+    График стратегии: цена (close) с метками buy/sell и кривая эквити.
+
+    result: dict из backtest_engine.run_backtest() + symbol, year, lookback —
+    equity_curve, candles, lookback, trades, symbol, year, initial_deposit, final_equity.
+    strategy_title: если задан, используется в заголовке графика вместо стандартного.
+    """
+    if result.get("error"):
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=dpi)
+        ax.text(0.5, 0.5, result["error"], ha="center", va="center", fontsize=12)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    candles = result.get("candles") or []
+    lookback = result.get("lookback", 100)
+    equity_curve = result.get("equity_curve") or []
+    trades = result.get("trades") or []
+    symbol = result.get("symbol", "—")
+    year = result.get("year", 0)
+    initial = result.get("initial_deposit", 100.0)
+    final_eq = result.get("final_equity", 100.0)
+    n_trades = result.get("n_trades", 0)
+    max_dd = result.get("max_drawdown_pct", 0.0)
+
+    if len(candles) < lookback or len(equity_curve) == 0:
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=dpi)
+        ax.text(0.5, 0.5, "Недостаточно данных для графика", ha="center", va="center", fontsize=12)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
+    # Бары, по которым считалась эквити: candles[lookback], candles[lookback+1], ...
+    n_eq = len(equity_curve)
+    dates = []
+    closes = []
+    for i in range(n_eq):
+        c = candles[lookback + i]
+        ts = c["start_time"] / 1000 if c["start_time"] > 1e10 else c["start_time"]
+        dates.append(datetime.utcfromtimestamp(ts))
+        closes.append(c["close"])
+
+    buy_times = [t["time"] for t in trades if t.get("side") == "buy"]
+    sell_times = [t["time"] for t in trades if t.get("side") == "sell"]
+    buy_dates = [datetime.utcfromtimestamp(t / 1000 if t > 1e10 else t) for t in buy_times]
+    sell_dates = [datetime.utcfromtimestamp(t / 1000 if t > 1e10 else t) for t in sell_times]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), dpi=dpi, sharex=True, gridspec_kw={"height_ratios": [1.2, 1]})
+
+    # Верхний: цена
+    ax1.plot(dates, closes, color="#3498db", linewidth=1.2, label="Close")
+    for d in buy_dates:
+        ax1.axvline(x=d, color="#26a67a", linestyle="--", alpha=0.8, linewidth=1)
+    for d in sell_dates:
+        ax1.axvline(x=d, color="#ef5350", linestyle="--", alpha=0.8, linewidth=1)
+    ax1.set_ylabel("Цена")
+    title_str = strategy_title if strategy_title else "Стратегия: лонг при бычьем тренде, выход при медвежьем"
+    ax1.set_title(f"{symbol}  |  {title_str}  |  {year} г.")
+    ax1.grid(True, alpha=0.3)
+    green_patch = mpatches.Patch(color="#26a67a", alpha=0.5, label="Покупка")
+    red_patch = mpatches.Patch(color="#ef5350", alpha=0.5, label="Продажа")
+    ax1.legend(handles=[green_patch, red_patch], loc="upper right", fontsize=8)
+
+    # Нижний: эквити
+    ax2.plot(dates, equity_curve, color="#9b59b6", linewidth=1.5, label="Эквити")
+    ax2.axhline(y=initial, color="gray", linestyle=":", alpha=0.7)
+    ax2.set_ylabel("Эквити ($)")
+    ax2.set_xlabel("Дата")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc="upper right", fontsize=8)
+
+    pnl = final_eq - initial
+    pnl_pct = (pnl / initial * 100) if initial > 0 else 0
+    fig.suptitle(
+        f"Депозит: {initial:.0f} $  →  Итог: {final_eq:.2f} $  |  PnL: {pnl:+.2f} $ ({pnl_pct:+.1f}%)  |  Сделок: {n_trades}  |  Макс. просадка: {max_dd:.1f}%",
+        fontsize=10, y=1.02,
+    )
     plt.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)

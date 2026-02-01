@@ -15,6 +15,28 @@ logger = logging.getLogger(__name__)
 
 TABLE_NAME = "klines"
 # (symbol, timeframe, start_time) — уникальный ключ
+ORDERFLOW_TABLE_NAME = "orderflow_metrics"
+# Метрики микроструктуры (DOM, T&S, Delta, Sweeps) — одна запись на тик при ORDERFLOW_SAVE_TO_DB
+ORDERFLOW_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {ORDERFLOW_TABLE_NAME} (
+    symbol          TEXT NOT NULL,
+    ts              INTEGER NOT NULL,
+    imbalance_ratio REAL,
+    bid_volume      REAL,
+    ask_volume      REAL,
+    delta           REAL,
+    buy_volume      REAL,
+    sell_volume     REAL,
+    delta_ratio     REAL,
+    volume_per_sec  REAL,
+    trades_count    INTEGER,
+    is_volume_spike INTEGER,
+    last_sweep_side TEXT,
+    last_sweep_time INTEGER,
+    PRIMARY KEY (symbol, ts)
+);
+CREATE INDEX IF NOT EXISTS ix_orderflow_symbol_ts ON {ORDERFLOW_TABLE_NAME} (symbol, ts);
+"""
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     symbol     TEXT NOT NULL,
@@ -45,6 +67,7 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path), check_same_thread=False)
     con.executescript(SCHEMA)
+    con.executescript(ORDERFLOW_SCHEMA)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=5000")  # 5 с ожидания при блокировке (несколько процессов)
     return con
@@ -185,3 +208,100 @@ def get_candles(
     if not order_asc and out:
         out.reverse()
     return out
+
+
+def insert_orderflow_metrics(
+    cursor: sqlite3.Cursor,
+    symbol: str,
+    ts: int,
+    of_result: dict[str, Any],
+) -> int:
+    """
+    Вставляет одну запись метрик Order Flow (DOM, T&S, Delta, Sweeps).
+    of_result — результат analyze_orderflow() (dom, time_and_sales, volume_delta, sweeps).
+    ts — unix-время в секундах (момент записи).
+    Возвращает 1 при успешной вставке, 0 при дубликате (INSERT OR REPLACE — всегда 1).
+    """
+    dom = of_result.get("dom") or {}
+    tns = of_result.get("time_and_sales") or {}
+    delta = of_result.get("volume_delta") or {}
+    sweeps = of_result.get("sweeps") or {}
+    try:
+        cursor.execute(
+            f"""
+            INSERT OR REPLACE INTO {ORDERFLOW_TABLE_NAME}
+            (symbol, ts, imbalance_ratio, bid_volume, ask_volume, delta, buy_volume, sell_volume,
+             delta_ratio, volume_per_sec, trades_count, is_volume_spike, last_sweep_side, last_sweep_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                symbol,
+                ts,
+                dom.get("imbalance_ratio"),
+                dom.get("raw_bid_volume"),
+                dom.get("raw_ask_volume"),
+                delta.get("delta"),
+                delta.get("buy_volume"),
+                delta.get("sell_volume"),
+                delta.get("delta_ratio"),
+                tns.get("volume_per_sec"),
+                tns.get("trades_count") or delta.get("trades_count"),
+                1 if tns.get("is_volume_spike") else 0,
+                sweeps.get("last_sweep_side"),
+                sweeps.get("last_sweep_time"),
+            ),
+        )
+        return cursor.rowcount
+    except sqlite3.IntegrityError:
+        return 0
+
+
+def get_orderflow_metrics(
+    cursor: sqlite3.Cursor,
+    symbol: str,
+    *,
+    limit: int | None = None,
+    order_asc: bool = True,
+    ts_from: int | None = None,
+    ts_to: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Загружает метрики Order Flow по символу.
+    order_asc=True — от старых к новым (для бэктеста по времени).
+    ts_from / ts_to — опциональный диапазон (unix секунды).
+    """
+    conditions = ["symbol = ?"]
+    params: list[Any] = [symbol]
+    if ts_from is not None:
+        conditions.append("ts >= ?")
+        params.append(ts_from)
+    if ts_to is not None:
+        conditions.append("ts <= ?")
+        params.append(ts_to)
+    where = " AND ".join(conditions)
+    order = "ASC" if order_asc else "DESC"
+    sql = f"SELECT symbol, ts, imbalance_ratio, bid_volume, ask_volume, delta, buy_volume, sell_volume, delta_ratio, volume_per_sec, trades_count, is_volume_spike, last_sweep_side, last_sweep_time FROM {ORDERFLOW_TABLE_NAME} WHERE {where} ORDER BY ts {order}"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
+    return [
+        {
+            "symbol": r[0],
+            "ts": int(r[1]),
+            "imbalance_ratio": r[2],
+            "bid_volume": r[3],
+            "ask_volume": r[4],
+            "delta": r[5],
+            "buy_volume": r[6],
+            "sell_volume": r[7],
+            "delta_ratio": r[8],
+            "volume_per_sec": r[9],
+            "trades_count": r[10],
+            "is_volume_spike": bool(r[11]) if r[11] is not None else False,
+            "last_sweep_side": r[12],
+            "last_sweep_time": r[13],
+        }
+        for r in rows
+    ]

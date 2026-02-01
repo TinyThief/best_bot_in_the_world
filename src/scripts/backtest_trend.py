@@ -7,8 +7,9 @@ flat не считается «попаданием» по направлени�
 
 Опция --min-strength: учитывать только оценки с strength >= N.
 Опция --tune: перебор порогов TREND_STRENGTH_MIN, TREND_UNCLEAR_THRESHOLD (через переопределение в config).
+Опции --train-ratio / --oos-bars: разделение на train и out-of-sample (OOS). Итоговая метрика по OOS — ближе к форварду. См. docs/BACKTEST_OOS.md.
 
-Запуск: python backtest_trend.py [--tf 60] [--bars 20000]; с фильтром: python backtest_trend.py --min-strength 0.4
+Запуск: python backtest_trend.py [--tf 60] [--bars 20000]; с OOS: python backtest_trend.py --train-ratio 0.7 --tf 60
 """
 from __future__ import annotations
 
@@ -79,6 +80,35 @@ def _run_one(
         "min_strength": min_strength,
     }
     return returns_by_direction, stats
+
+
+def _split_candles(
+    candles: list[dict[str, Any]],
+    lookback: int,
+    forward_bars: int,
+    train_ratio: float | None = None,
+    oos_bars: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    """
+    Делит свечи по времени: train = более старая часть, test = более новая (OOS).
+    Свечи order_asc=False: candles[0]=новейшая. train_ratio=0.7 → 70% старых = train, 30% новых = OOS.
+    oos_bars: ровно столько последних баров = OOS.
+    """
+    n = len(candles)
+    min_len = lookback + forward_bars
+    if n < min_len * 2:
+        return None
+    if oos_bars is not None:
+        if oos_bars < min_len or n - oos_bars < min_len:
+            return None
+        split_idx = oos_bars
+    elif train_ratio is not None and 0 < train_ratio < 1:
+        split_idx = int(n * (1 - train_ratio))
+        if split_idx < min_len or n - split_idx < min_len:
+            return None
+    else:
+        return None
+    return (candles[split_idx:], candles[:split_idx])
 
 
 def run_for_chart(
@@ -159,6 +189,8 @@ def run(
     threshold_up: float = 0.005,
     threshold_down: float = -0.005,
     min_strength: float = 0.0,
+    train_ratio: float | None = None,
+    oos_bars: int | None = None,
 ) -> None:
     symbol = symbol or config.SYMBOL
     conn = get_connection()
@@ -168,6 +200,31 @@ def run(
 
     if len(candles) < lookback + forward_bars:
         print(f"Мало свечей: {len(candles)}, нужно минимум {lookback + forward_bars}", file=sys.stderr)
+        return
+
+    split = _split_candles(candles, lookback, forward_bars, train_ratio, oos_bars)
+    if split is not None:
+        train_candles, test_candles = split
+        _, stats_train = _run_one(
+            train_candles, symbol, timeframe, lookback, forward_bars, step,
+            threshold_up, threshold_down, min_strength=min_strength,
+        )
+        _, stats_test = _run_one(
+            test_candles, symbol, timeframe, lookback, forward_bars, step,
+            threshold_up, threshold_down, min_strength=min_strength,
+        )
+        print("=" * 60)
+        print("Бэктест тренда | train / out-of-sample (OOS)")
+        print("=" * 60)
+        print(f"Пара: {symbol}, ТФ: {timeframe}")
+        print(f"Train: {len(train_candles)} бар (старшая часть)  |  OOS: {len(test_candles)} бар (новейшая часть)")
+        print(f"Окно: lookback={lookback}, forward={forward_bars}, шаг={step}")
+        print()
+        print("In-sample (train):  точность по направлению = {:.1f}%  (оценок: {})".format(
+            stats_train["total_accuracy"] * 100, stats_train.get("total_n", 0)))
+        print("Out-of-sample (OOS): точность по направлению = {:.1f}%  (оценок: {})  ← ориентируйся на это".format(
+            stats_test["total_accuracy"] * 100, stats_test.get("total_n", 0)))
+        print()
         return
 
     returns_by_direction, stats = _run_one(
@@ -236,6 +293,8 @@ def main() -> None:
     parser.add_argument("--threshold-up", type=float, default=0.005, help="Порог «рост» (доля, по умолчанию 0.5%%)")
     parser.add_argument("--threshold-down", type=float, default=-0.005, help="Порог «падение» (доля, по умолчанию -0.5%%)")
     parser.add_argument("--min-strength", type=float, default=0.0, help="Учитывать только оценки с strength >= N (0 = без фильтра)")
+    parser.add_argument("--train-ratio", type=float, default=None, help="Доля данных для train (0.7 = 70%% старых), остальное = OOS. См. docs/BACKTEST_OOS.md")
+    parser.add_argument("--oos-bars", type=int, default=None, help="Ровно столько последних баров = out-of-sample (остальное = train)")
     args = parser.parse_args()
 
     run(
@@ -248,6 +307,8 @@ def main() -> None:
         threshold_up=args.threshold_up,
         threshold_down=args.threshold_down,
         min_strength=args.min_strength,
+        train_ratio=args.train_ratio,
+        oos_bars=args.oos_bars,
     )
 
 

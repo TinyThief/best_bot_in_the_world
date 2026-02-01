@@ -331,7 +331,7 @@ def detect_trading_zones(
     pivot_left: int = 3,
     pivot_right: int = 3,
     cluster_threshold_pct: float = 0.002,
-    max_levels: int = 12,
+    max_levels: int | None = 12,
     recent_flip_lookback_bars: int = 20,
     volume_confirm_ratio: float = 0.5,
     volume_ma_period: int = 20,
@@ -343,7 +343,7 @@ def detect_trading_zones(
       candles — OHLCV свечи (от старых к новым).
       pivot_left, pivot_right — окно для определения свинг-пивотов.
       cluster_threshold_pct — порог объединения близких уровней (0.002 = 0.2%).
-      max_levels — максимум уровней в выдаче (по силе/свежести).
+      max_levels — максимум уровней в выдаче (по силе/свежести); None = все найденные уровни.
       recent_flip_lookback_bars — в каком окне считать «недавний» переворот роли.
 
     Возвращает:
@@ -372,9 +372,10 @@ def detect_trading_zones(
     levels = _add_round_bonus(levels)
     levels = _add_recency(levels, candles)
     levels = _apply_composite_strength(levels)
-    # Сортируем по composite strength и свежести, берём топ max_levels
+    # Сортируем по composite strength и свежести; при max_levels=None оставляем все уровни
     levels.sort(key=lambda l: (l["strength"], l["bar_index"]), reverse=True)
-    levels = levels[:max_levels]
+    if max_levels is not None:
+        levels = levels[:max_levels]
     levels = _assign_current_roles(
         levels, candles,
         volume_confirm_ratio=volume_confirm_ratio,

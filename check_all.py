@@ -408,6 +408,126 @@ def check_analysis_modules() -> CheckResult:
         return _fail("проверка модулей анализа", str(e))
 
 
+def check_orderflow() -> CheckResult:
+    """Order Flow: orderflow.py (DOM, T&S, Delta, Sweeps), analyze_orderflow; при ORDERFLOW_ENABLED — OrderbookStream, TradesStream."""
+    try:
+        from src.analysis.orderflow import (
+            analyze_dom,
+            analyze_time_and_sales,
+            compute_volume_delta,
+            detect_sweeps,
+            analyze_orderflow,
+        )
+    except ImportError as e:
+        return _fail("импорт orderflow", str(e))
+    # DOM: mock snapshot
+    try:
+        snap = {"bids": [[100.0, 10.0], [99.0, 50.0]], "asks": [[101.0, 20.0], [102.0, 5.0]]}
+        dom = analyze_dom(snap, depth_levels=5)
+        if "imbalance_ratio" not in dom or "clusters_bid" not in dom or "significant_levels" not in dom:
+            return _fail("analyze_dom: неверная структура", str(list(dom.keys())))
+        if not (0 <= dom["imbalance_ratio"] <= 1):
+            return _fail("analyze_dom: imbalance_ratio вне [0,1]", str(dom["imbalance_ratio"]))
+    except Exception as e:
+        return _fail("analyze_dom", str(e))
+    # T&S и Delta: mock trades (T, side, size)
+    try:
+        now_ms = 1700000000000
+        trades = [
+            {"T": now_ms - 30_000, "side": "Buy", "size": 1.0},
+            {"T": now_ms - 20_000, "side": "Sell", "size": 0.5},
+            {"T": now_ms - 10_000, "side": "Buy", "size": 2.0},
+        ]
+        tns = analyze_time_and_sales(trades, window_sec=60.0, now_ts_ms=now_ms)
+        if "total_volume" not in tns or "buy_volume" not in tns or "trades_count" not in tns:
+            return _fail("analyze_time_and_sales: неверная структура", str(list(tns.keys())))
+        delta = compute_volume_delta(trades, window_sec=60.0, now_ts_ms=now_ms)
+        if "delta" not in delta or "delta_ratio" not in delta:
+            return _fail("compute_volume_delta: неверная структура", str(list(delta.keys())))
+    except Exception as e:
+        return _fail("T&S / Delta", str(e))
+    # Sweeps: mock candles и уровни из DOM
+    try:
+        candles = [
+            {"start_time": 1000, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5},
+            {"start_time": 2000, "open": 100.5, "high": 102.0, "low": 99.5, "close": 101.0},
+        ]
+        levels = [{"price": 99.0, "side": "bid"}, {"price": 102.0, "side": "ask"}]
+        sweeps = detect_sweeps(candles, levels, lookback_bars=5)
+        if "recent_sweeps_bid" not in sweeps or "last_sweep_side" not in sweeps:
+            return _fail("detect_sweeps: неверная структура", str(list(sweeps.keys())))
+    except Exception as e:
+        return _fail("detect_sweeps", str(e))
+    # Сводный вызов
+    try:
+        of = analyze_orderflow(
+            orderbook_snapshot=snap,
+            recent_trades=trades,
+            candles=candles,
+            window_sec=60.0,
+        )
+        if "dom" not in of or "time_and_sales" not in of or "volume_delta" not in of or "sweeps" not in of:
+            return _fail("analyze_orderflow: неверная структура", str(list(of.keys())))
+    except Exception as e:
+        return _fail("analyze_orderflow", str(e))
+    # При ORDERFLOW_ENABLED проверяем наличие потоков (импорт, не запуск)
+    if _config and getattr(_config, "ORDERFLOW_ENABLED", False):
+        try:
+            from src.core.orderbook_ws import OrderbookStream
+            from src.core.trades_ws import TradesStream
+            if not hasattr(OrderbookStream, "get_snapshot") or not hasattr(TradesStream, "get_recent_trades_since"):
+                return _fail("OrderbookStream/TradesStream: нет get_snapshot или get_recent_trades_since", None)
+            return _ok("orderflow (DOM, T&S, Delta, Sweeps), OrderbookStream, TradesStream готовы", None)
+        except ImportError as e:
+            return _fail("ORDERFLOW_ENABLED=1, но импорт потоков", str(e))
+    return _ok("orderflow (DOM, T&S, Delta, Sweeps) — модуль и прогон по mock-данным ок", None)
+
+
+def check_microstructure_sandbox() -> CheckResult:
+    """Песочница микроструктуры: MicrostructureSandbox, виртуальная позиция и PnL по сигналу."""
+    try:
+        from src.app.microstructure_sandbox import MicrostructureSandbox, _mid_from_snapshot
+    except ImportError as e:
+        return _fail("импорт microstructure_sandbox", str(e))
+    try:
+        snap = {"bids": [[100.0, 10.0], [99.0, 5.0]], "asks": [[101.0, 8.0], [102.0, 3.0]]}
+        mid = _mid_from_snapshot(snap)
+        if mid is None or abs(mid - 100.5) > 0.01:
+            return _fail("_mid_from_snapshot: неверный mid", str(mid))
+        of_mock = {"dom": {"imbalance_ratio": 0.6}, "volume_delta": {"delta_ratio": 0.2}, "sweeps": {"last_sweep_side": None}}
+        sandbox = MicrostructureSandbox(initial_balance=100.0)
+        state = sandbox.update(of_mock, mid, 1700000000)
+        if "position_side" not in state or "total_realized_pnl" not in state or "unrealized_pnl" not in state:
+            return _fail("MicrostructureSandbox.update: неверная структура state", str(list(state.keys())))
+        return _ok("microstructure_sandbox (виртуальная позиция и PnL по сигналу) — ок", None)
+    except Exception as e:
+        return _fail("microstructure_sandbox", str(e))
+
+
+def check_microstructure_signal() -> CheckResult:
+    """Сигнал по микроструктуре: microstructure_signal.compute_microstructure_signal (long/short/none по Order Flow)."""
+    try:
+        from src.analysis.microstructure_signal import compute_microstructure_signal
+    except ImportError as e:
+        return _fail("импорт microstructure_signal", str(e))
+    try:
+        of_mock = {
+            "dom": {"imbalance_ratio": 0.6},
+            "volume_delta": {"delta_ratio": 0.2},
+            "sweeps": {"last_sweep_side": None},
+        }
+        res = compute_microstructure_signal(of_mock)
+        if res.get("direction") not in ("long", "short", "none"):
+            return _fail("microstructure_signal: неверный direction", str(res.get("direction")))
+        if "confidence" not in res or "details" not in res:
+            return _fail("microstructure_signal: нет confidence или details", str(list(res.keys())))
+        if res["direction"] != "long":
+            return _fail("microstructure_signal: при delta_ratio=0.2, imbalance=0.6 ожидался long", str(res))
+        return _ok("microstructure_signal (long/short/none по DOM, Delta, Sweep) — ок", None)
+    except Exception as e:
+        return _fail("microstructure_signal", str(e))
+
+
 def check_exchange_retry_config() -> CheckResult:
     """Наличие настроек ретраев в конфиге."""
     if _config is None:
@@ -454,6 +574,9 @@ def main() -> int:
         ("multi_tf (exchange)", check_multi_tf_exchange),
         ("multi_tf (db)", check_multi_tf_db),
         ("Модули анализа", check_analysis_modules),
+        ("Order Flow", check_orderflow),
+        ("Сигнал по микроструктуре", check_microstructure_signal),
+        ("Песочница микроструктуры", check_microstructure_sandbox),
         ("Логирование", check_logging),
         ("Ретраи Bybit", check_exchange_retry_config),
         ("Telegram-бот", check_telegram),

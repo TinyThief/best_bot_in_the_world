@@ -26,6 +26,13 @@ _phase_history: dict[str, list[str]] = {}
 _trend_history: dict[str, list[str]] = {}
 
 
+def reset_multi_tf_history() -> None:
+    """Сбрасывает историю фаз и трендов по ТФ (для бэктеста — чистое состояние на каждый прогон)."""
+    global _phase_history, _trend_history
+    _phase_history = {}
+    _trend_history = {}
+
+
 def _update_phase_stability(tf: str, phase: str) -> tuple[float, bool]:
     """
     Добавляет фазу в историю по ТФ, возвращает (phase_stability, phase_stable).
@@ -172,32 +179,29 @@ _default_trend_info = {
 }
 
 
-def analyze_multi_timeframe(
-    symbol: str | None = None,
-    intervals: list[str] | None = None,
-    data_source: str | None = None,
-    db_conn: sqlite3.Connection | None = None,
+def _tf_sort_key(tf: str) -> tuple[int, str]:
+    """Порядок таймфреймов: младшие числа — раньше (15 < 60 < D)."""
+    if tf == "D":
+        return (1_000_000, "D")
+    if tf == "W":
+        return (2_000_000, "W")
+    if tf == "M":
+        return (3_000_000, "M")
+    try:
+        return (int(tf), tf)
+    except ValueError:
+        return (0, tf)
+
+
+def _compute_multi_tf_result(
+    data: dict[str, list[dict[str, Any]]],
+    intervals: list[str],
+    symbol: str,
 ) -> dict[str, Any]:
     """
-    Собирает данные по всем таймфреймам, тренды, 6 фаз и агрегированный сигнал.
-    data_source: "db" | "exchange" | None (берётся из config.DATA_SOURCE).
-    db_conn: при data_source="db" — соединение с БД; иначе используется биржа.
+    Внутренняя логика мультитаймфреймового анализа по готовым данным.
+    data[tf] = список свечей (от старых к новым). Используется из analyze_multi_timeframe и analyze_multi_timeframe_from_data.
     """
-    symbol = symbol or config.SYMBOL
-    intervals = intervals or config.TIMEFRAMES
-    if not intervals:
-        return {
-            "symbol": symbol,
-            "timeframes": {},
-            "higher_tf_trend": "flat",
-            "signals": {"direction": "none", "reason": "no timeframes", "confidence": 0.0, "confidence_level": "—"},
-        }
-
-    src = (data_source or getattr(config, "DATA_SOURCE", "exchange") or "exchange").lower()
-    if src == "db" and db_conn is not None:
-        data = _load_candles_from_db(db_conn, symbol, intervals, limit=config.KLINE_LIMIT or 200)
-    else:
-        data = get_klines_multi_timeframe(symbol=symbol, intervals=intervals)
     sorted_tfs = sorted(intervals, key=_tf_sort_key)
     higher_tf = sorted_tfs[-1] if sorted_tfs else None
 
@@ -316,8 +320,10 @@ def analyze_multi_timeframe(
     # Уровни по свинг-точкам (HH/HL): поддержка и сопротивление, расстояние цены до них
     levels = swing_levels(higher_tf_candles, pivots=5) if len(higher_tf_candles) >= 10 else {}
     # Торговые зоны (динамические уровни с переключением ролей: сопротивление → поддержка и наоборот)
+    _zones_max = getattr(config, "TRADING_ZONES_MAX_LEVELS", 0)
+    _zones_max_levels_arg = None if _zones_max <= 0 else _zones_max
     trading_zones = (
-        detect_trading_zones(higher_tf_candles)
+        detect_trading_zones(higher_tf_candles, max_levels=_zones_max_levels_arg)
         if len(higher_tf_candles) >= 15
         else {"levels": [], "nearest_support": None, "nearest_resistance": None, "zone_low": None, "zone_high": None, "in_zone": False, "at_support_zone": False, "at_resistance_zone": False, "recent_flips": [], "distance_to_support_pct": None, "distance_to_resistance_pct": None}
     )
@@ -332,7 +338,7 @@ def analyze_multi_timeframe(
             _candles = (timeframes_report.get(_tf) or {}).get("candles") or []
             if len(_candles) < 15:
                 continue
-            _z = detect_trading_zones(_candles, max_levels=8)
+            _z = detect_trading_zones(_candles, max_levels=_zones_max_levels_arg)
             _other_prices = [lev["price"] for lev in (_z.get("levels") or [])]
             for lev in trading_zones["levels"]:
                 p = lev.get("price")
@@ -485,6 +491,25 @@ def analyze_multi_timeframe(
         confidence_level = "—"
     above_min = confidence >= signal_min_conf
 
+    # Снимок «текущее состояние рынка» (prop-style): решение только по тому, что происходит сейчас на всех ТФ
+    higher_tf_regime_ru = higher_tf_data.get("regime_ru", "—")
+    mom_dir_ru = higher_tf_data.get("momentum_direction_ru", "—")
+    in_zone = (trading_zones.get("in_zone") or False)
+    at_sup = trading_zones.get("at_support_zone") or False
+    at_res = trading_zones.get("at_resistance_zone") or False
+    zone_parts = []
+    if at_sup:
+        zone_parts.append("у поддержки")
+    if at_res:
+        zone_parts.append("у сопротивления")
+    if in_zone and not zone_parts:
+        zone_parts.append("в зоне S–R")
+    zone_str = ", ".join(zone_parts) if zone_parts else "вне ключевых зон"
+    market_state_narrative = (
+        f"Сейчас: старший ТФ — тренд {higher_tf_trend}, фаза {higher_tf_phase_ru}, режим {higher_tf_regime_ru}; "
+        f"цена {zone_str}; импульс {mom_dir_ru}. Совпадение ТФ: {tf_align_count}/{len(sorted_tfs)}."
+    )
+
     return {
         "symbol": symbol,
         "timeframes": timeframes_report,
@@ -552,17 +577,56 @@ def analyze_multi_timeframe(
         "higher_tf_momentum_direction_ru": higher_tf_data.get("momentum_direction_ru", "Нейтральный"),
         "higher_tf_momentum_rsi": higher_tf_data.get("momentum_rsi"),
         "higher_tf_momentum_return_5": higher_tf_data.get("momentum_return_5"),
+        "market_state_narrative": market_state_narrative,
+        "decision_basis": "current_snapshot",
     }
 
 
-def _tf_sort_key(tf: str) -> tuple[int, str]:
-    if tf == "D":
-        return (1_000_000, "D")
-    if tf == "W":
-        return (2_000_000, "W")
-    if tf == "M":
-        return (3_000_000, "M")
-    try:
-        return (int(tf), tf)
-    except ValueError:
-        return (0, tf)
+def analyze_multi_timeframe(
+    symbol: str | None = None,
+    intervals: list[str] | None = None,
+    data_source: str | None = None,
+    db_conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """
+    Собирает данные по всем таймфреймам, тренды, 6 фаз и агрегированный сигнал.
+    data_source: "db" | "exchange" | None (берётся из config.DATA_SOURCE).
+    db_conn: при data_source="db" — соединение с БД; иначе используется биржа.
+    """
+    symbol = symbol or config.SYMBOL
+    intervals = intervals or config.TIMEFRAMES
+    if not intervals:
+        return {
+            "symbol": symbol,
+            "timeframes": {},
+            "higher_tf_trend": "flat",
+            "signals": {"direction": "none", "reason": "no timeframes", "confidence": 0.0, "confidence_level": "—"},
+        }
+    src = (data_source or getattr(config, "DATA_SOURCE", "exchange") or "exchange").lower()
+    if src == "db" and db_conn is not None:
+        data = _load_candles_from_db(db_conn, symbol, intervals, limit=config.KLINE_LIMIT or 200)
+    else:
+        data = get_klines_multi_timeframe(symbol=symbol, intervals=intervals)
+    return _compute_multi_tf_result(data, intervals, symbol)
+
+
+def analyze_multi_timeframe_from_data(
+    data_by_tf: dict[str, list[dict[str, Any]]],
+    intervals: list[str] | None = None,
+    symbol: str | None = None,
+) -> dict[str, Any]:
+    """
+    Мультитаймфреймовый анализ по уже загруженным свечам (для бэктеста).
+    data_by_tf[tf] = список свечей (от старых к новым), доступных на момент «сейчас».
+    intervals — список ТФ для анализа; если None, берутся ключи data_by_tf.
+    """
+    symbol = symbol or config.SYMBOL
+    intervals = intervals or list(data_by_tf.keys())
+    if not intervals:
+        return {
+            "symbol": symbol,
+            "timeframes": {},
+            "higher_tf_trend": "flat",
+            "signals": {"direction": "none", "reason": "no timeframes", "confidence": 0.0, "confidence_level": "—"},
+        }
+    return _compute_multi_tf_result(data_by_tf, intervals, symbol)
