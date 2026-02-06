@@ -23,16 +23,18 @@ def _of(delta_ratio: float = 0.0, imbalance_ratio: float = 0.5, last_sweep_side:
 
 
 def test_returns_expected_keys() -> None:
-    """compute_microstructure_signal возвращает direction, confidence, reason, details."""
+    """compute_microstructure_signal возвращает direction, confidence, reason, sweep_only, details."""
     from src.analysis.microstructure_signal import compute_microstructure_signal
 
     res = compute_microstructure_signal(_of(0.2, 0.6))
     assert "direction" in res
     assert "confidence" in res
     assert "reason" in res
+    assert "sweep_only" in res
     assert "details" in res
     assert res["direction"] in ("long", "short", "none")
     assert 0 <= res["confidence"] <= 1
+    assert isinstance(res["sweep_only"], bool)
     assert "score" in res["details"]
     assert "delta_ratio" in res["details"]
     assert "imbalance_ratio" in res["details"]
@@ -88,6 +90,20 @@ def test_sweep_ask_boosts_short() -> None:
     res = compute_microstructure_signal(with_sweep_ask, min_score_for_direction=0.2)
     assert res["details"]["sweep_contribution"] < 0
     assert res["details"]["score"] < 0
+
+
+def test_sweep_only_flag_when_no_delta_imbalance() -> None:
+    """При направлении только от sweep (delta/imbalance нейтральны) sweep_only=True."""
+    from src.analysis.microstructure_signal import compute_microstructure_signal
+
+    # Нейтральные delta и imbalance, но sweep bid даёт long при низком пороге
+    only_sweep = _of(0.0, 0.5, last_sweep_side="bid")
+    res = compute_microstructure_signal(only_sweep, min_score_for_direction=0.2)
+    assert res["sweep_only"] is True
+    # При delta+imbalance в ту же сторону — sweep_only=False
+    with_delta = _of(0.2, 0.58, last_sweep_side="bid")
+    res2 = compute_microstructure_signal(with_delta, min_score_for_direction=0.2)
+    assert res2["sweep_only"] is False
 
 
 def test_empty_orderflow_returns_none() -> None:

@@ -112,6 +112,63 @@ def _volume_and_side(t: dict[str, Any]) -> tuple[float, str]:
     return (vol, side)
 
 
+def last_trades_and_block(
+    trades: list[dict[str, Any]],
+    *,
+    last_k: int = 10,
+    bias_ratio_min: float = 1.2,
+) -> dict[str, Any]:
+    """
+    Последние K сделок и «последний блок» (лента как у пропов).
+
+    trades: список сделок (от старых к новым); берутся последние last_k.
+    last_k: сколько последних сделок учитывать.
+    bias_ratio_min: отношение buy/sell или sell/buy выше порога → bias buy/sell.
+
+    Возвращает: last_trades_bias ("buy" | "sell" | "neutral"), last_block_side ("buy" | "sell" | None),
+    last_trades_buy_vol, last_trades_sell_vol, last_trades_count.
+    """
+    if not trades or last_k <= 0:
+        return {
+            "last_trades_bias": "neutral",
+            "last_block_side": None,
+            "last_trades_buy_vol": 0.0,
+            "last_trades_sell_vol": 0.0,
+            "last_trades_count": 0,
+        }
+    last = trades[-last_k:]
+    buy_vol = 0.0
+    sell_vol = 0.0
+    for t in last:
+        vol, side = _volume_and_side(t)
+        if "buy" in side:
+            buy_vol += vol
+        else:
+            sell_vol += vol
+    total = buy_vol + sell_vol
+    bias = "neutral"
+    if total > 0:
+        if buy_vol >= bias_ratio_min * sell_vol and sell_vol > 0:
+            bias = "buy"
+        elif sell_vol >= bias_ratio_min * buy_vol and buy_vol > 0:
+            bias = "sell"
+        elif buy_vol > 0 and sell_vol == 0:
+            bias = "buy"
+        elif sell_vol > 0 and buy_vol == 0:
+            bias = "sell"
+    last_block_side = None
+    if last:
+        _, side = _volume_and_side(last[-1])
+        last_block_side = "buy" if "buy" in side else "sell"
+    return {
+        "last_trades_bias": bias,
+        "last_block_side": last_block_side,
+        "last_trades_buy_vol": round(buy_vol, 4),
+        "last_trades_sell_vol": round(sell_vol, 4),
+        "last_trades_count": len(last),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 2. Time & Sales (исполненные сделки)
 # ---------------------------------------------------------------------------
@@ -178,6 +235,108 @@ def analyze_time_and_sales(
     }
 
 
+def trades_by_level(
+    trades: list[dict[str, Any]],
+    *,
+    window_sec: float = 60.0,
+    now_ts_ms: int | None = None,
+    bucket_tick: float = 0.1,
+    top_n: int = 10,
+) -> dict[str, Any]:
+    """
+    Агрегация T&S по ценовым уровням: объём (buy/sell/total) на каждый бакет цены за окно.
+
+    trades: список сделок (T, side/S, size/v, p/price).
+    window_sec: окно в секундах.
+    now_ts_ms: конец окна (мс); None = макс T по сделкам.
+    bucket_tick: шаг цены для бакета (0.1 для BTCUSDT linear).
+    top_n: сколько «горячих» уровней вернуть по убыванию total_volume.
+
+    Возвращает: volume_by_level (список {price, buy_volume, sell_volume, total_volume}), hot_levels (топ top_n).
+    """
+    if not trades:
+        return {"volume_by_level": [], "hot_levels": []}
+    end_ts = now_ts_ms if now_ts_ms is not None else max((t.get("T") or 0) for t in trades)
+    in_window = _trades_in_window(trades, end_ts, window_sec)
+    buckets: dict[float, list[tuple[float, str]]] = {}
+    for t in in_window:
+        try:
+            price = float(t.get("p") or t.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        bucket = round(price / bucket_tick) * bucket_tick
+        vol, side = _volume_and_side(t)
+        if bucket not in buckets:
+            buckets[bucket] = []
+        buckets[bucket].append((vol, side))
+    volume_by_level: list[dict[str, Any]] = []
+    for price_bucket, vol_sides in buckets.items():
+        buy_vol = sum(v for v, s in vol_sides if "buy" in s)
+        sell_vol = sum(v for v, s in vol_sides if "buy" not in s)
+        total = buy_vol + sell_vol
+        volume_by_level.append({
+            "price": price_bucket,
+            "buy_volume": round(buy_vol, 4),
+            "sell_volume": round(sell_vol, 4),
+            "total_volume": round(total, 4),
+        })
+    volume_by_level.sort(key=lambda x: x["total_volume"], reverse=True)
+    hot_levels = volume_by_level[:top_n]
+    return {"volume_by_level": volume_by_level, "hot_levels": hot_levels}
+
+
+def compute_delta_price_divergence(
+    trades: list[dict[str, Any]],
+    *,
+    window_sec: float = 20.0,
+    now_ts_ms: int | None = None,
+    delta_ratio_threshold: float = 0.1,
+) -> dict[str, Any]:
+    """
+    Дивергенция дельты и цены за окно: цена растёт при отрицательной дельте = медвежья; цена падает при положительной = бычья.
+
+    trades: список сделок (T, p/price, side, size/v).
+    window_sec: окно в секундах.
+    now_ts_ms: конец окна (мс).
+    delta_ratio_threshold: порог |delta_ratio| для учёта дивергенции.
+
+    Возвращает: bearish_divergence (price up, delta < -threshold), bullish_divergence (price down, delta > threshold),
+    first_price, last_price, delta_ratio.
+    """
+    out: dict[str, Any] = {
+        "bearish_divergence": False,
+        "bullish_divergence": False,
+        "first_price": None,
+        "last_price": None,
+        "delta_ratio": 0.0,
+    }
+    if not trades or window_sec <= 0:
+        return out
+    end_ts = now_ts_ms if now_ts_ms is not None else max((t.get("T") or 0) for t in trades)
+    in_window = _trades_in_window(trades, end_ts, window_sec)
+    if len(in_window) < 2:
+        return out
+    delta = compute_volume_delta(trades, window_sec=window_sec, now_ts_ms=end_ts)
+    delta_ratio = float(delta.get("delta_ratio") or 0.0)
+    out["delta_ratio"] = delta_ratio
+    try:
+        first_price = float(in_window[0].get("p") or in_window[0].get("price") or 0)
+        last_price = float(in_window[-1].get("p") or in_window[-1].get("price") or 0)
+    except (TypeError, ValueError):
+        return out
+    if first_price <= 0 or last_price <= 0:
+        return out
+    out["first_price"] = first_price
+    out["last_price"] = last_price
+    price_up = last_price > first_price
+    price_down = last_price < first_price
+    out["bearish_divergence"] = price_up and delta_ratio <= -delta_ratio_threshold
+    out["bullish_divergence"] = price_down and delta_ratio >= delta_ratio_threshold
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 3. Volume Delta
 # ---------------------------------------------------------------------------
@@ -204,10 +363,17 @@ def compute_volume_delta(
             "buy_volume": 0.0,
             "sell_volume": 0.0,
             "delta_ratio": 0.0,
+            "first_half_delta_ratio": 0.0,
+            "second_half_delta_ratio": 0.0,
             "trades_count": 0,
         }
     end_ts = now_ts_ms if now_ts_ms is not None else max((t.get("T") or 0) for t in trades)
     in_window = _trades_in_window(trades, end_ts, window_sec)
+    half_sec = window_sec / 2.0
+    second_half_begin = int(end_ts - half_sec * 1000)
+    first_half_trades = [t for t in in_window if (t.get("T") or 0) < second_half_begin]
+    second_half_trades = [t for t in in_window if (t.get("T") or 0) >= second_half_begin]
+
     buy_vol = 0.0
     sell_vol = 0.0
     for t in in_window:
@@ -219,11 +385,34 @@ def compute_volume_delta(
     delta = buy_vol - sell_vol
     total = buy_vol + sell_vol
     delta_ratio = (delta / total) if total > 0 else 0.0
+
+    b1, s1 = 0.0, 0.0
+    for t in first_half_trades:
+        vol, side = _volume_and_side(t)
+        if "buy" in side:
+            b1 += vol
+        else:
+            s1 += vol
+    tot1 = b1 + s1
+    first_half_delta_ratio = ((b1 - s1) / tot1) if tot1 > 0 else 0.0
+
+    b2, s2 = 0.0, 0.0
+    for t in second_half_trades:
+        vol, side = _volume_and_side(t)
+        if "buy" in side:
+            b2 += vol
+        else:
+            s2 += vol
+    tot2 = b2 + s2
+    second_half_delta_ratio = ((b2 - s2) / tot2) if tot2 > 0 else 0.0
+
     return {
         "delta": delta,
         "buy_volume": buy_vol,
         "sell_volume": sell_vol,
         "delta_ratio": delta_ratio,
+        "first_half_delta_ratio": first_half_delta_ratio,
+        "second_half_delta_ratio": second_half_delta_ratio,
         "trades_count": len(in_window),
     }
 
@@ -327,6 +516,97 @@ def detect_sweeps(
 
 
 # ---------------------------------------------------------------------------
+# 5. Поглощение (absorption): изменение стакана до/после крупной сделки
+# ---------------------------------------------------------------------------
+
+
+def analyze_absorption(
+    prev_snapshot: dict[str, Any] | None,
+    current_snapshot: dict[str, Any],
+    *,
+    depth_levels: int = 20,
+    min_drop_ratio: float = 0.7,
+) -> dict[str, Any]:
+    """
+    Сравнение стакана до и после: снижение объёма на стороне спроса = поглощение.
+
+    prev_snapshot: снимок стакана до тика (None = нет предыдущего).
+    current_snapshot: текущий снимок.
+    depth_levels: сколько уровней суммировать с каждой стороны.
+    min_drop_ratio: порог: текущий объём < prev * min_drop_ratio считаем поглощением (0.7 = падение на 30%).
+
+    Возвращает: absorption_bid (bool), absorption_ask (bool), bid_volume_before, bid_volume_after,
+    ask_volume_before, ask_volume_after, bid_drop_ratio, ask_drop_ratio.
+    """
+    out: dict[str, Any] = {
+        "absorption_bid": False,
+        "absorption_ask": False,
+        "bid_volume_before": None,
+        "bid_volume_after": None,
+        "ask_volume_before": None,
+        "ask_volume_after": None,
+        "bid_drop_ratio": None,
+        "ask_drop_ratio": None,
+    }
+    if not current_snapshot:
+        return out
+    bids_curr = _parse_levels(current_snapshot, "bid", depth_levels)
+    asks_curr = _parse_levels(current_snapshot, "ask", depth_levels)
+    vol_bid_after = sum(s for _, s in bids_curr)
+    vol_ask_after = sum(s for _, s in asks_curr)
+    out["bid_volume_after"] = vol_bid_after
+    out["ask_volume_after"] = vol_ask_after
+    if not prev_snapshot:
+        return out
+    bids_prev = _parse_levels(prev_snapshot, "bid", depth_levels)
+    asks_prev = _parse_levels(prev_snapshot, "ask", depth_levels)
+    vol_bid_before = sum(s for _, s in bids_prev)
+    vol_ask_before = sum(s for _, s in asks_prev)
+    out["bid_volume_before"] = vol_bid_before
+    out["ask_volume_before"] = vol_ask_before
+    if vol_bid_before > 0:
+        r = vol_bid_after / vol_bid_before
+        out["bid_drop_ratio"] = round(r, 4)
+        if r < min_drop_ratio:
+            out["absorption_bid"] = True
+    if vol_ask_before > 0:
+        r = vol_ask_after / vol_ask_before
+        out["ask_drop_ratio"] = round(r, 4)
+        if r < min_drop_ratio:
+            out["absorption_ask"] = True
+    return out
+
+
+def enrich_absorption_with_block(
+    absorption: dict[str, Any] | None,
+    last_trades: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    Связка поглощения с последним блоком: покупатели съели ask → бычий контекст; продавцы съели bid → медвежий.
+
+    absorption: результат analyze_absorption (absorption_bid, absorption_ask).
+    last_trades: результат last_trades_and_block (last_block_side).
+
+    Добавляет absorption_bullish (True если absorption_ask и last_block_side buy), absorption_bearish (True если absorption_bid и last_block_side sell).
+    """
+    if not absorption:
+        return absorption
+    side = (last_trades or {}).get("last_block_side")
+    if not side:
+        absorption["absorption_bullish"] = False
+        absorption["absorption_bearish"] = False
+        return absorption
+    side = str(side).strip().lower()
+    absorption["absorption_bullish"] = bool(
+        absorption.get("absorption_ask") and "buy" in side
+    )
+    absorption["absorption_bearish"] = bool(
+        absorption.get("absorption_bid") and "sell" in side
+    )
+    return absorption
+
+
+# ---------------------------------------------------------------------------
 # Сводный вызов (для интеграции в бота)
 # ---------------------------------------------------------------------------
 
@@ -344,21 +624,53 @@ def analyze_orderflow(
     orderbook_snapshot: OrderbookStream.get_snapshot().
     recent_trades: TradesStream.get_recent_trades() (когда будет реализован).
     candles: последние свечи младшего ТФ для sweep по теням.
+    short_window_sec: короткое окно «последний импульс» для context_now (0 = выкл).
 
-    Возвращает: dom, time_and_sales, volume_delta, sweeps.
+    Возвращает: dom, time_and_sales, volume_delta, sweeps, short_window_delta (если short_window_sec > 0).
     """
     dom_kw = {k: kwargs[k] for k in ("depth_levels", "wall_percentile") if k in kwargs}
     tns_kw = {k: kwargs[k] for k in ("window_sec", "volume_spike_mult", "now_ts_ms") if k in kwargs}
     delta_kw = {k: kwargs[k] for k in ("window_sec", "now_ts_ms") if k in kwargs}
     sweeps_kw = {k: kwargs[k] for k in ("lookback_bars", "wick_ratio_min") if k in kwargs}
+    short_window_sec = float(kwargs.get("short_window_sec") or 0)
+    now_ts_ms = kwargs.get("now_ts_ms")
+
     dom = analyze_dom(orderbook_snapshot or {}, **dom_kw) if orderbook_snapshot else {}
     tns = analyze_time_and_sales(recent_trades or [], **tns_kw) if recent_trades else {}
     delta = compute_volume_delta(recent_trades or [], **delta_kw) if recent_trades else {}
     sweeps = detect_sweeps(candles or [], dom.get("significant_levels"), **sweeps_kw) if candles else {}
+    tns_level_kw = {k: kwargs[k] for k in ("window_sec", "now_ts_ms") if k in kwargs}
+    trades_by_level_result = (
+        trades_by_level(recent_trades or [], bucket_tick=0.1, top_n=10, **tns_level_kw)
+        if recent_trades else {"volume_by_level": [], "hot_levels": []}
+    )
 
-    return {
+    out: dict[str, Any] = {
         "dom": dom,
         "time_and_sales": tns,
         "volume_delta": delta,
         "sweeps": sweeps,
+        "trades_by_level": trades_by_level_result,
     }
+    if short_window_sec > 0 and recent_trades:
+        short_delta = compute_volume_delta(
+            recent_trades,
+            window_sec=short_window_sec,
+            now_ts_ms=now_ts_ms,
+        )
+        out["short_window_delta"] = short_delta
+        out["delta_price_divergence"] = compute_delta_price_divergence(
+            recent_trades,
+            window_sec=short_window_sec,
+            now_ts_ms=now_ts_ms,
+            delta_ratio_threshold=0.1,
+        )
+    else:
+        out["short_window_delta"] = None
+        out["delta_price_divergence"] = None
+    last_k = int(kwargs.get("last_trades_k") or 10)
+    if recent_trades and last_k > 0:
+        out["last_trades"] = last_trades_and_block(recent_trades, last_k=last_k)
+    else:
+        out["last_trades"] = None
+    return out

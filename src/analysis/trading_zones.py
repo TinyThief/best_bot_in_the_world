@@ -217,15 +217,75 @@ def _add_recency(
     return levels
 
 
-def _apply_composite_strength(
+def _add_rejection_strength(
     levels: list[dict[str, Any]],
-    weight_touches: float = 0.35,
-    weight_volume: float = 0.25,
-    weight_recency: float = 0.25,
-    weight_round: float = 0.15,
+    candles: list[dict[str, Any]],
+    *,
+    bars_after: int = 3,
+    wick_weight: float = 0.5,
+    return_weight: float = 0.5,
+    atr_period: int = 14,
 ) -> list[dict[str, Any]]:
     """
-    Сводная сила уровня (0..1): взвешенная сумма от touches, volume_ratio, recency, round_bonus.
+    Сила отбоя на уровне: для каждого касания — длина тени и движение цены после (return).
+    Поддержка: нижняя тень + рост на следующих N барах. Сопротивление: верхняя тень + падение.
+    Добавляет rejection_strength (0..1) в каждый уровень.
+    """
+    if not candles or not levels:
+        return levels
+    atr_val = _atr(candles, atr_period)
+    atr_val = atr_val if atr_val and atr_val > 0 else (candles[-1]["high"] - candles[-1]["low"]) if candles else 0.0
+    n = len(candles)
+    for lev in levels:
+        zone_low = lev.get("level_zone_low")
+        zone_high = lev.get("level_zone_high")
+        price = lev.get("price", 0)
+        origin = lev.get("origin_role", ORIGIN_SUPPORT)
+        if zone_low is None or zone_high is None or price <= 0:
+            lev["rejection_strength"] = 0.0
+            continue
+        reactions: list[float] = []
+        for i in range(lev.get("bar_index", 0), n):
+            c = candles[i]
+            low = float(c.get("low", 0))
+            high = float(c.get("high", 0))
+            o = float(c.get("open", 0))
+            cl = float(c.get("close", 0))
+            if low > zone_high or high < zone_low:
+                continue
+            body = abs(cl - o) or 1e-12
+            if origin == ORIGIN_SUPPORT:
+                lower_wick = min(o, cl) - low
+                wick_ratio = min(1.0, lower_wick / body) if body > 0 else 0.0
+                i_end = min(i + bars_after + 1, n)
+                close_after = candles[i_end - 1]["close"] if i_end > i else cl
+                ret = (float(close_after) - cl) / atr_val if atr_val > 0 else 0.0
+                return_norm = min(1.0, max(0.0, ret / 2.0 + 0.5))
+            else:
+                upper_wick = high - max(o, cl)
+                wick_ratio = min(1.0, upper_wick / body) if body > 0 else 0.0
+                i_end = min(i + bars_after + 1, n)
+                close_after = candles[i_end - 1]["close"] if i_end > i else cl
+                ret = (cl - float(close_after)) / atr_val if atr_val > 0 else 0.0
+                return_norm = min(1.0, max(0.0, ret / 2.0 + 0.5))
+            r = wick_weight * wick_ratio + return_weight * return_norm
+            reactions.append(r)
+        lev["rejection_strength"] = round(
+            sum(reactions) / len(reactions) if reactions else 0.0, 4
+        )
+    return levels
+
+
+def _apply_composite_strength(
+    levels: list[dict[str, Any]],
+    weight_touches: float = 0.30,
+    weight_volume: float = 0.22,
+    weight_recency: float = 0.22,
+    weight_round: float = 0.13,
+    weight_rejection: float = 0.13,
+) -> list[dict[str, Any]]:
+    """
+    Сводная сила уровня (0..1): взвешенная сумма от touches, volume_ratio, recency, round_bonus, rejection_strength.
     """
     if not levels:
         return levels
@@ -238,11 +298,13 @@ def _apply_composite_strength(
         volume_ratio = min(1.0, vol / median_vol) if median_vol > 0 else 0.0
         recency = lev.get("recency", 1.0)
         round_bonus = lev.get("round_bonus", 0.0)
+        rejection = lev.get("rejection_strength", 0.0)
         strength = (
             weight_touches * touches_norm
             + weight_volume * volume_ratio
             + weight_recency * recency
             + weight_round * round_bonus
+            + weight_rejection * rejection
         )
         lev["strength"] = round(min(1.0, max(0.0, strength)), 3)
     return levels
@@ -255,16 +317,50 @@ def _volume_ma(candles: list[dict[str, Any]], end_idx: int, period: int = 20) ->
     return sum(vol) / len(vol) if vol else 0.0
 
 
+def _check_retest_after_break(
+    candles: list[dict[str, Any]],
+    break_bar: int,
+    price: float,
+    zone_low: float,
+    zone_high: float,
+    resistance_broken: bool,
+) -> bool:
+    """
+    Был ли ретест после пробоя: цена вернулась в зону (zone_low..zone_high) и снова закрылась с нужной стороны.
+    resistance_broken=True → пробой сопротивления вверх, ищем close > price после ретеста.
+    resistance_broken=False → пробой поддержки вниз, ищем close < price после ретеста.
+    """
+    n = len(candles)
+    for k in range(break_bar + 1, n):
+        c = candles[k]
+        low = float(c.get("low", 0))
+        high = float(c.get("high", 0))
+        close = float(c.get("close", 0))
+        in_zone = low <= zone_high and high >= zone_low
+        if not in_zone:
+            continue
+        for m in range(k + 1, n):
+            close_m = float(candles[m].get("close", 0))
+            if resistance_broken and close_m > price:
+                return True
+            if not resistance_broken and close_m < price:
+                return True
+        break
+    return False
+
+
 def _assign_current_roles(
     levels: list[dict[str, Any]],
     candles: list[dict[str, Any]],
     volume_confirm_ratio: float = 0.5,
     volume_ma_period: int = 20,
+    require_retest_or_volume: bool = True,
 ) -> list[dict[str, Any]]:
     """
     Для каждого уровня по истории свечей от бара образования до конца определяет:
     был ли пробой (close выше resistance / ниже support) и текущую роль (current_role, broken).
-    Подтверждение пробоя: переключаем роль только если объём на баре пробоя >= volume_confirm_ratio * MA(volume, 20).
+    Подтверждение пробоя: breakout_confirmed = объём на баре пробоя >= volume_confirm_ratio * MA(volume, 20)
+    либо ретест (цена вернулась в зону уровня и снова закрылась с нужной стороны). Роль переключаем только при breakout_confirmed (если require_retest_or_volume).
     """
     if not candles:
         return levels
@@ -273,31 +369,53 @@ def _assign_current_roles(
         price = lev["price"]
         bar_start = lev["bar_index"]
         origin = lev["origin_role"]
-        broken = False
-        broken_at_bar: int | None = None
+        zone_low = lev.get("level_zone_low")
+        zone_high = lev.get("level_zone_high")
+        first_break_bar: int | None = None
+        volume_ok = False
         if origin == ORIGIN_RESISTANCE:
             for j in range(bar_start + 1, len(closes)):
                 if closes[j] > price:
+                    first_break_bar = j
                     vol_j = candles[j].get("volume", 0.0)
                     avg_vol = _volume_ma(candles, j, volume_ma_period)
-                    if avg_vol <= 0 or vol_j >= volume_confirm_ratio * avg_vol:
-                        broken = True
-                        broken_at_bar = j
+                    volume_ok = avg_vol <= 0 or vol_j >= volume_confirm_ratio * avg_vol
                     break
-            current_role = CURRENT_SUPPORT if broken else CURRENT_RESISTANCE
+            retest_ok = False
+            if first_break_bar is not None and zone_low is not None and zone_high is not None:
+                retest_ok = _check_retest_after_break(
+                    candles, first_break_bar, price, zone_low, zone_high, resistance_broken=True
+                )
+            breakout_confirmed = volume_ok or retest_ok
+            effective_broken = first_break_bar is not None and (
+                breakout_confirmed or not require_retest_or_volume
+            )
+            current_role = CURRENT_SUPPORT if effective_broken else CURRENT_RESISTANCE
+            lev["broken"] = effective_broken
+            lev["broken_at_bar"] = first_break_bar if effective_broken else None
+            lev["breakout_confirmed"] = first_break_bar is not None and breakout_confirmed
         else:
             for j in range(bar_start + 1, len(closes)):
                 if closes[j] < price:
+                    first_break_bar = j
                     vol_j = candles[j].get("volume", 0.0)
                     avg_vol = _volume_ma(candles, j, volume_ma_period)
-                    if avg_vol <= 0 or vol_j >= volume_confirm_ratio * avg_vol:
-                        broken = True
-                        broken_at_bar = j
+                    volume_ok = avg_vol <= 0 or vol_j >= volume_confirm_ratio * avg_vol
                     break
-            current_role = CURRENT_RESISTANCE if broken else CURRENT_SUPPORT
+            retest_ok = False
+            if first_break_bar is not None and zone_low is not None and zone_high is not None:
+                retest_ok = _check_retest_after_break(
+                    candles, first_break_bar, price, zone_low, zone_high, resistance_broken=False
+                )
+            breakout_confirmed = volume_ok or retest_ok
+            effective_broken = first_break_bar is not None and (
+                breakout_confirmed or not require_retest_or_volume
+            )
+            current_role = CURRENT_RESISTANCE if effective_broken else CURRENT_SUPPORT
+            lev["broken"] = effective_broken
+            lev["broken_at_bar"] = first_break_bar if effective_broken else None
+            lev["breakout_confirmed"] = first_break_bar is not None and breakout_confirmed
         lev["current_role"] = current_role
-        lev["broken"] = broken
-        lev["broken_at_bar"] = broken_at_bar
     return levels
 
 
@@ -371,6 +489,7 @@ def detect_trading_zones(
     levels = _add_zone_width(levels, candles)
     levels = _add_round_bonus(levels)
     levels = _add_recency(levels, candles)
+    levels = _add_rejection_strength(levels, candles)
     levels = _apply_composite_strength(levels)
     # Сортируем по composite strength и свежести; при max_levels=None оставляем все уровни
     levels.sort(key=lambda l: (l["strength"], l["bar_index"]), reverse=True)

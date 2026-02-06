@@ -153,16 +153,50 @@ def _log_report(report: dict[str, Any]) -> None:
             sweeps.get("last_sweep_side") or "—",
             sweeps.get("last_sweep_time") or "—",
         )
+        absorption = of.get("absorption")
+        if absorption:
+            logger.info(
+                "  Absorption: bid=%s ask=%s | bid_drop=%.2f ask_drop=%.2f | bullish=%s bearish=%s",
+                absorption.get("absorption_bid", False),
+                absorption.get("absorption_ask", False),
+                absorption.get("bid_drop_ratio") or 0,
+                absorption.get("ask_drop_ratio") or 0,
+                absorption.get("absorption_bullish", False),
+                absorption.get("absorption_bearish", False),
+            )
+        div = of.get("delta_price_divergence")
+        if div:
+            logger.info(
+                "  Delta/price divergence: bearish=%s bullish=%s | first=%.2f last=%.2f delta_ratio=%.3f",
+                div.get("bearish_divergence", False),
+                div.get("bullish_divergence", False),
+                div.get("first_price") or 0,
+                div.get("last_price") or 0,
+                div.get("delta_ratio") or 0,
+            )
+    # Контекст «здесь и сейчас» (уровень + flow за короткое окно)
+    ctx = report.get("context_now")
+    if ctx:
+        logger.info(
+            "  Context now: at_support=%s at_resistance=%s | flow_bullish=%s flow_bearish=%s | absorption_bull=%s absorption_bear=%s | short_delta_ratio=%.3f | allowed_long=%s allowed_short=%s",
+            ctx.get("at_support"), ctx.get("at_resistance"),
+            ctx.get("flow_bullish_now"), ctx.get("flow_bearish_now"),
+            ctx.get("absorption_bullish"), ctx.get("absorption_bearish"),
+            ctx.get("short_window_delta_ratio", 0),
+            ctx.get("allowed_long"), ctx.get("allowed_short"),
+        )
     # Песочница микроструктуры (виртуальная позиция и PnL)
     sandbox_state = report.get("microstructure_sandbox")
     if sandbox_state:
         logger.info(
-            "  Песочница микроструктуры: позиция=%s | entry=%.2f | realized=$%.2f | unrealized=$%.2f | эквити=$%.2f | сигнал=%s (%.2f)",
+            "  Песочница микроструктуры: позиция=%s | entry=%.2f | realized=$%.2f | комиссия=$%.2f | unrealized=$%.2f | эквити=$%.2f | сделок=%s | сигнал=%s (%.2f)",
             sandbox_state.get("position_side", "—"),
             sandbox_state.get("entry_price", 0),
             sandbox_state.get("total_realized_pnl", 0),
+            sandbox_state.get("total_commission", 0),
             sandbox_state.get("unrealized_pnl", 0),
             sandbox_state.get("equity_usd", 0),
+            sandbox_state.get("trades_count", 0),
             sandbox_state.get("last_signal_direction", "—"),
             sandbox_state.get("last_signal_confidence", 0),
         )
@@ -200,10 +234,12 @@ def run_one_tick(
     orderbook_stream: Any = None,
     trades_stream: Any = None,
     microstructure_sandbox: Any = None,
+    last_orderbook_snapshot: list | None = None,
 ) -> float:
     """
     Один проход цикла: обновить БД по таймеру, выполнить анализ, залогировать.
     При ORDERFLOW_ENABLED и переданных orderbook_stream/trades_stream добавляется Order Flow (DOM, T&S, Delta, Sweeps).
+    При last_orderbook_snapshot (список из одного элемента) — анализ поглощения (стакан до/после); после тика в [0] пишется текущий снимок.
     При microstructure_sandbox — обновляется виртуальная позиция по сигналу микроструктуры, результат в report.
     Возвращает актуальную метку времени последнего обновления БД.
     """
@@ -212,13 +248,14 @@ def run_one_tick(
 
     if getattr(config, "ORDERFLOW_ENABLED", False) and (orderbook_stream or trades_stream):
         try:
-            from ..analysis.orderflow import analyze_orderflow
+            from ..analysis.orderflow import analyze_orderflow, analyze_absorption, enrich_absorption_with_block
             from .microstructure_sandbox import _mid_from_snapshot
             orderbook_snapshot = orderbook_stream.get_snapshot() if orderbook_stream else None
             window_sec = getattr(config, "ORDERFLOW_WINDOW_SEC", 60.0)
+            short_window_sec = float(getattr(config, "ORDERFLOW_SHORT_WINDOW_SEC", 0) or 0)
             now_ms = int(time.time() * 1000)
             recent_trades = (
-                trades_stream.get_recent_trades_since(now_ms - int(window_sec * 1000))
+                trades_stream.get_recent_trades_since(now_ms - int(max(window_sec, short_window_sec or 0) * 1000))
                 if trades_stream
                 else []
             )
@@ -228,8 +265,44 @@ def run_one_tick(
                 recent_trades=recent_trades if recent_trades else None,
                 candles=candles_for_sweep if candles_for_sweep else None,
                 window_sec=window_sec,
+                short_window_sec=short_window_sec,
+                now_ts_ms=now_ms,
+                last_trades_k=10,
             )
             report["orderflow"] = of_result
+            # Поглощение: сравнение стакана до/после (при передаче last_orderbook_snapshot)
+            if last_orderbook_snapshot is not None and len(last_orderbook_snapshot) > 0 and orderbook_snapshot:
+                prev_snap = last_orderbook_snapshot[0]
+                absorption = analyze_absorption(
+                    prev_snap,
+                    orderbook_snapshot,
+                    depth_levels=20,
+                    min_drop_ratio=0.7,
+                )
+                of_result["absorption"] = absorption
+                enrich_absorption_with_block(of_result["absorption"], of_result.get("last_trades"))
+            else:
+                of_result["absorption"] = None
+            if orderbook_snapshot and last_orderbook_snapshot is not None and len(last_orderbook_snapshot) > 0:
+                last_orderbook_snapshot[0] = orderbook_snapshot
+            mid = _mid_from_snapshot(orderbook_snapshot) if orderbook_snapshot else None
+            if of_result and mid is not None and mid > 0:
+                try:
+                    from ..analysis.context_now import compute_context_now
+                    level_pct = float(getattr(config, "CONTEXT_NOW_LEVEL_DISTANCE_PCT", 0.0015) or 0.0015)
+                    delta_min = float(getattr(config, "CONTEXT_NOW_DELTA_RATIO_MIN", 0.12) or 0.12)
+                    use_dom_levels = bool(getattr(config, "CONTEXT_NOW_USE_DOM_LEVELS", False))
+                    report["context_now"] = compute_context_now(
+                        mid, of_result, report.get("trading_zones"),
+                        level_distance_pct=level_pct,
+                        delta_ratio_min=delta_min,
+                        use_dom_levels=use_dom_levels,
+                    )
+                except Exception as e:
+                    logger.debug("context_now пропущен: %s", e)
+                    report["context_now"] = None
+            else:
+                report["context_now"] = None
             if getattr(config, "ORDERFLOW_SAVE_TO_DB", False) and db_conn and of_result:
                 try:
                     from ..core.database import insert_orderflow_metrics
@@ -239,16 +312,20 @@ def run_one_tick(
                 except Exception as e:
                     logger.debug("Order Flow запись в БД пропущена: %s", e)
             # Песочница микроструктуры: виртуальная позиция и PnL по сигналу
-            if microstructure_sandbox is not None and orderbook_snapshot and of_result:
-                mid = _mid_from_snapshot(orderbook_snapshot)
-                if mid is not None:
-                    try:
-                        state = microstructure_sandbox.update(of_result, mid, int(time.time()))
-                        report["microstructure_sandbox"] = state
-                        from . import sandbox_state
-                        sandbox_state.set_last_state(state)
-                    except Exception as e:
-                        logger.debug("Песочница микроструктуры пропущена: %s", e)
+            if microstructure_sandbox is not None and orderbook_snapshot and of_result and mid is not None:
+                try:
+                    higher_tf_trend = report.get("higher_tf_trend") or None
+                    context_now = report.get("context_now")
+                    state = microstructure_sandbox.update(
+                        of_result, mid, int(time.time()),
+                        higher_tf_trend=higher_tf_trend,
+                        context_now=context_now,
+                    )
+                    report["microstructure_sandbox"] = state
+                    from . import sandbox_state
+                    sandbox_state.set_last_state(state)
+                except Exception as e:
+                    logger.debug("Песочница микроструктуры пропущена: %s", e)
         except Exception as e:
             logger.debug("Order Flow анализ пропущен: %s", e)
 

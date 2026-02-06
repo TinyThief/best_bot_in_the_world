@@ -288,7 +288,7 @@ def check_telegram() -> CheckResult:
 
 
 def check_scripts() -> CheckResult:
-    """Импорт скриптов: accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once, trend_daily_full, trend_backtest_report."""
+    """Импорт скриптов: accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once, trend_daily_full, trend_backtest_report, backtest_sandbox, sandbox_backtest_report."""
     try:
         from src.scripts import (
             accumulate_db,
@@ -299,6 +299,8 @@ def check_scripts() -> CheckResult:
             test_run_once,
             trend_daily_full,
             trend_backtest_report,
+            backtest_sandbox,
+            sandbox_backtest_report,
         )
         ok = (
             hasattr(accumulate_db, "main")
@@ -309,11 +311,13 @@ def check_scripts() -> CheckResult:
             and hasattr(test_run_once, "run")
             and hasattr(trend_daily_full, "main")
             and hasattr(trend_backtest_report, "main")
+            and hasattr(backtest_sandbox, "main")
+            and hasattr(sandbox_backtest_report, "main")
         )
         if not ok:
             return _fail("у скриптов нет main/run", None)
         return _ok(
-            "accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once, trend_daily_full, trend_backtest_report",
+            "accumulate_db, full_backfill, backtest_phases, backtest_trend, compare_phase_methods, test_run_once, trend_daily_full, trend_backtest_report, backtest_sandbox, sandbox_backtest_report",
             None,
         )
     except Exception as e:
@@ -528,6 +532,24 @@ def check_microstructure_signal() -> CheckResult:
         return _fail("microstructure_signal", str(e))
 
 
+def check_context_now() -> CheckResult:
+    """Контекст «здесь и сейчас»: context_now.compute_context_now (уровень + flow за короткое окно)."""
+    try:
+        from src.analysis.context_now import compute_context_now
+    except ImportError as e:
+        return _fail("импорт context_now", str(e))
+    try:
+        of_mock = {"short_window_delta": {"delta_ratio": 0.2}, "sweeps": {"last_sweep_side": "bid"}}
+        zones_mock = {"nearest_support": {"price": 100.0}, "nearest_resistance": {"price": 102.0}, "zone_low": 99.0, "zone_high": 101.0}
+        res = compute_context_now(100.5, of_mock, zones_mock)
+        for k in ("at_support", "at_resistance", "flow_bullish_now", "flow_bearish_now", "allowed_long", "allowed_short"):
+            if k not in res:
+                return _fail("context_now: нет ключа %s" % k, str(list(res.keys())))
+        return _ok("context_now (уровень + flow сейчас) — ок", None)
+    except Exception as e:
+        return _fail("context_now", str(e))
+
+
 def check_exchange_retry_config() -> CheckResult:
     """Наличие настроек ретраев в конфиге."""
     if _config is None:
@@ -576,6 +598,7 @@ def main() -> int:
         ("Модули анализа", check_analysis_modules),
         ("Order Flow", check_orderflow),
         ("Сигнал по микроструктуре", check_microstructure_signal),
+        ("Контекст «здесь и сейчас»", check_context_now),
         ("Песочница микроструктуры", check_microstructure_sandbox),
         ("Логирование", check_logging),
         ("Ретраи Bybit", check_exchange_retry_config),

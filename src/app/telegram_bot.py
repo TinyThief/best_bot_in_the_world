@@ -1,6 +1,6 @@
 """
 Управление ботом через Telegram.
-Команды: /start, /help, /signal, /status, /sandbox, /zones, /zones_chart, /zones_1h, /momentum, /db, /health, /backtest_phases, /chart, /phases, /trend_daily, /trend_backtest, /trade_2025, /id.
+Команды: /start, /help, /signal, /status, /sandbox, /sandbox_logs, /zones, /zones_chart, /zones_1h, /momentum, /db, /health, /backtest_phases, /chart, /phases, /trend_daily, /trend_backtest, /trade_2025, /id.
 Reply-панель + inline-кнопки: Сигнал | Зоны | Импульс | Песочница | Обновить | БД. Алерт при смене сигнала (TELEGRAM_ALERT_*).
 Запуск: python telegram_bot.py (launcher в корне).
 """
@@ -10,6 +10,8 @@ import asyncio
 import logging
 import sqlite3
 import time
+from io import BytesIO
+from pathlib import Path
 
 from ..core import config
 from ..core.database import get_connection, get_db_path, get_candles, count_candles
@@ -28,9 +30,11 @@ try:
         ReplyKeyboardMarkup,
         ReplyKeyboardRemove,
     )
+    from telegram.error import BadRequest
 except ImportError:
     BotCommand = InlineKeyboardButton = InlineKeyboardMarkup = None  # type: ignore
     KeyboardButton = ReplyKeyboardMarkup = ReplyKeyboardRemove = None  # type: ignore
+    BadRequest = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,7 @@ HELP_TEXT = """<b>Сигнал и фазы</b>
 /db — статистика базы свечей
 /health — свежесть БД по ТФ, последнее обновление
 /sandbox — песочница микроструктуры: позиция, PnL, эквити в реальном времени (при ORDERFLOW + песочница)
+/sandbox_logs — выгрузить файлы логов песочницы (сделки, сводки, сессии, пропуски) в чат
 
 <b>Прочее</b>
 /id — твой Telegram user id (для TELEGRAM_ALLOWED_IDS)
@@ -84,6 +89,7 @@ CB_REFRESH_MOMENTUM = "cb_refresh_momentum"
 CB_REFRESH_DB = "cb_refresh_db"
 CB_SANDBOX = "cb_sandbox"
 CB_REFRESH_SANDBOX = "cb_refresh_sandbox"
+CB_SANDBOX_LOGS = "cb_sandbox_logs"
 
 MAIN_KEYBOARD = [
     [BTN_SIGNAL, BTN_DB],
@@ -402,9 +408,11 @@ def _get_sandbox_text() -> str:
         pos = state.get("position_side", "—")
         entry = state.get("entry_price", 0)
         realized = state.get("total_realized_pnl", 0)
+        commission = state.get("total_commission", 0)
         unrealized = state.get("unrealized_pnl", 0)
         equity = state.get("equity_usd", 0)
         initial = state.get("initial_balance_usd", 0)
+        trades_count = state.get("trades_count", 0)
         signal_dir = state.get("last_signal_direction", "—")
         signal_conf = state.get("last_signal_confidence", 0)
         reason = state.get("last_signal_reason", "")
@@ -418,8 +426,10 @@ def _get_sandbox_text() -> str:
             "",
             f"Старт: ${initial:.0f}",
             f"Реализовано PnL: ${realized:.2f}",
+            f"Комиссия: ${commission:.2f}",
             f"Нереализовано PnL: ${unrealized:.2f}",
             f"Эквити: ${equity:.2f}",
+            f"Сделок: {trades_count}",
             "",
             f"Последний сигнал: {signal_dir} (уверенность {signal_conf:.2f})",
         ]
@@ -429,6 +439,61 @@ def _get_sandbox_text() -> str:
     except Exception as e:
         logger.exception("Ошибка при запросе песочницы: %s", e)
         return f"Ошибка песочницы: {e}"
+
+
+def _get_sandbox_log_dir() -> Path:
+    """Каталог логов песочницы (logs/), тот же что в main и microstructure_sandbox."""
+    log_dir = getattr(config, "LOG_DIR", None)
+    if log_dir is None:
+        log_dir = Path(__file__).resolve().parents[2] / "logs"
+    if isinstance(log_dir, str):
+        log_dir = Path(log_dir)
+    return log_dir
+
+
+SANDBOX_LOG_FILES = [
+    ("sandbox_trades.csv", "Сделки (CSV)"),
+    ("sandbox_result.txt", "Сводки сессий (TXT)"),
+    ("sandbox_sessions.csv", "Сессии (CSV)"),
+    ("sandbox_skips.csv", "Пропуски входов (CSV)"),
+]
+
+
+async def _send_sandbox_logs(chat_id: int, bot, message_for_action=None) -> None:
+    """Отправляет файлы логов песочницы в чат (документы). Отправляет только существующие файлы."""
+    if message_for_action and hasattr(message_for_action, "reply_chat_action"):
+        await message_for_action.reply_chat_action("upload_document")
+    log_dir = _get_sandbox_log_dir()
+    sent = 0
+    for filename, _ in SANDBOX_LOG_FILES:
+        path = log_dir / filename
+        if not path.is_file():
+            continue
+        try:
+            with open(path, "rb") as f:
+                content = f.read()
+            await asyncio.wait_for(
+                bot.send_document(
+                    chat_id=chat_id,
+                    document=BytesIO(content),
+                    filename=filename,
+                    caption=filename,
+                ),
+                timeout=30.0,
+            )
+            sent += 1
+        except asyncio.TimeoutError:
+            logger.warning("Таймаут отправки %s в Telegram", filename)
+        except Exception as e:
+            logger.exception("Ошибка отправки %s: %s", filename, e)
+    if sent == 0:
+        await bot.send_message(
+            chat_id,
+            "Нет файлов логов песочницы (sandbox_trades.csv, sandbox_result.txt и др.). "
+            "Запустите бота с ORDERFLOW_ENABLED=1 и MICROSTRUCTURE_SANDBOX_ENABLED=1.",
+        )
+    else:
+        await bot.send_message(chat_id, f"Отправлено файлов: {sent}.")
 
 
 def _get_health_text(db_conn=None) -> str:
@@ -495,6 +560,7 @@ def _inline_actions_keyboard(kind: str):
     if kind == "sandbox":
         row2 = [
             InlineKeyboardButton("🔄 Обновить", callback_data=CB_REFRESH_SANDBOX),
+            InlineKeyboardButton("📥 Выгрузить логи", callback_data=CB_SANDBOX_LOGS),
             InlineKeyboardButton("🗄 БД", callback_data=CB_DB),
         ]
         return InlineKeyboardMarkup([row1, row2])
@@ -716,6 +782,15 @@ async def cmd_sandbox(update, context) -> None:
                 )
             except Exception:
                 pass
+
+
+async def cmd_sandbox_logs(update, context) -> None:
+    """Команда /sandbox_logs: отправить в чат файлы логов песочницы (trades, result, sessions, skips)."""
+    if not _check_allowed(_get_user_id(update)):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    chat_id = _resolve_chat_id(update.message)
+    await _send_sandbox_logs(chat_id, context.bot, message_for_action=update.message)
 
 
 async def cmd_db(update, context) -> None:
@@ -1165,7 +1240,13 @@ async def cmd_trade_2025(update, context) -> None:
 async def handle_callback(update, context) -> None:
     """Обработка нажатий inline-кнопок."""
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception as e:
+        if BadRequest is not None and isinstance(e, BadRequest):
+            logger.debug("Callback query устарел или недействителен: %s", e)
+        else:
+            raise
     user_id = q.from_user.id if q.from_user else 0
     if not _check_allowed(user_id):
         try:
@@ -1194,6 +1275,16 @@ async def handle_callback(update, context) -> None:
         await _reply_sandbox(chat, bot, context=context, send_action=False)
         try:
             await q.message.delete()
+        except Exception:
+            pass
+    elif data == CB_SANDBOX_LOGS:
+        try:
+            await q.edit_message_text("Выгружаю логи песочницы…")
+        except Exception:
+            pass
+        await _send_sandbox_logs(chat.id, bot, message_for_action=q.message)
+        try:
+            await q.answer()
         except Exception:
             pass
     elif data == CB_REFRESH_SIGNAL:
@@ -1353,6 +1444,7 @@ def run_bot(db_conn: sqlite3.Connection | None = None) -> None:
     app.add_handler(CommandHandler("momentum", cmd_momentum))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("sandbox", cmd_sandbox))
+    app.add_handler(CommandHandler("sandbox_logs", cmd_sandbox_logs))
     app.add_handler(CommandHandler("backtest_phases", cmd_backtest_phases))
     app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("phases", cmd_phases))

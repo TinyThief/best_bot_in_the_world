@@ -46,17 +46,55 @@ class _Settings(BaseSettings):
     TIMEFRAMES: str = "15,60,240"
     KLINE_LIMIT: int = 200
     POLL_INTERVAL_SEC: float = 60.0
+    # При ORDERFLOW_ENABLED использовать этот интервал опроса (быстрее, «здесь и сейчас»)
+    POLL_INTERVAL_ORDERFLOW_SEC: float = 15.0
+    # При SANDBOX_CONTEXT_NOW_ONLY (чисто проп-режим) — ещё чаще, событийная реакция (3 с)
+    POLL_INTERVAL_PROP_SEC: float = 3.0
     ORDERBOOK_LIMIT: int = 25  # глубина стакана (bid/ask) для get_orderbook; linear: 1–500
 
     # --- Order Flow (микроструктура: DOM, T&S, Delta, Sweeps) ---
     ORDERFLOW_ENABLED: bool = False  # при True в main запускаются OrderbookStream и TradesStream, результат в отчёте
     ORDERFLOW_WINDOW_SEC: float = 60.0  # окно для T&S и Volume Delta (сек)
+    ORDERFLOW_SHORT_WINDOW_SEC: float = 20.0  # короткое окно «последний импульс» для context_now (0 = выкл)
     # websocket-client требует ping_interval > ping_timeout
     ORDERFLOW_WS_PING_INTERVAL: int = 30  # интервал ping (сек); должен быть больше ping_timeout
     ORDERFLOW_WS_PING_TIMEOUT: int = 20  # таймаут ожидания pong (сек); меньше ping_interval
     ORDERFLOW_SAVE_TO_DB: bool = False  # при True метрики Order Flow пишутся в таблицу orderflow_metrics (та же БД)
     MICROSTRUCTURE_SANDBOX_ENABLED: bool = False  # при True виртуальная торговля по сигналу микроструктуры (песочница)
     SANDBOX_INITIAL_BALANCE: float = 100.0  # стартовый виртуальный баланс в USD для песочницы микроструктуры
+    SANDBOX_TAKER_FEE: float = 0.0006  # комиссия биржи (taker), доля от объёма; 0.0006 = 0.06% (Bybit linear)
+    SANDBOX_MIN_CONFIDENCE: float = 0.5  # минимальная уверенность сигнала для входа (0..1); выше = меньше сделок, комиссия не съедает депозит
+    SANDBOX_COOLDOWN_SEC: int = 120  # секунд после выхода до разрешения нового входа; снижает «пинг-понг»
+    SANDBOX_MIN_HOLD_SEC: int = 120  # минимум секунд удержания позиции перед разрешением выхода по микроструктуре
+    SANDBOX_EXIT_NONE_TICKS: int = 4  # тиков подряд с сигналом none/против — тогда закрыть; больше = меньше шума
+    SANDBOX_EXIT_MIN_CONFIDENCE: float = 0.0  # выход при confidence ниже порога (0 = не использовать); трейлинг по микроструктуре
+    SANDBOX_MIN_CONFIRMING_TICKS: int = 0  # минимум тиков «в нашу сторону» после входа перед разрешением выхода (0 = выкл)
+    SANDBOX_EXIT_WINDOW_TICKS: int = 0  # размер окна для выхода: последние M тиков (0 = только N подряд)
+    SANDBOX_EXIT_WINDOW_NEED: int = 0  # сколько из последних M тиков должны быть «на выход» (при EXIT_WINDOW_TICKS > 0)
+    SANDBOX_STOP_LOSS_PCT: float = 0.0  # стоп-лосс в % от entry (0 = выкл); выход по цене
+    SANDBOX_BREAKEVEN_TRIGGER_PCT: float = 0.0  # при прибыли >= этого % перенести SL в безубыток (0 = выкл)
+    SANDBOX_TAKE_PROFIT_PCT: float = 0.0  # тейк-профит в % от entry (0 = выкл); при пустом SANDBOX_TP_LEVELS
+    SANDBOX_TP_LEVELS: str = ""  # частичный TP: "0.2:40,0.35:60" = на 0.2% закрыть 40%, на 0.35% — остаток; пусто = один TP по SANDBOX_TAKE_PROFIT_PCT
+    SANDBOX_TRAIL_TRIGGER_PCT: float = 0.0  # при прибыли >= этого % включить трейлинг остатка (0 = выкл)
+    SANDBOX_TRAIL_PCT: float = 0.0  # откат от пика прибыли в % — закрыть по трейлингу (0 = выкл)
+    SANDBOX_MIN_PROFIT_PCT: float = 0.2  # при выходе по микроструктуре в плюсе: не закрывать, пока профит < этого % (0 = выкл)
+    SANDBOX_NO_OPEN_SAME_TICK_AS_CLOSE: bool = True  # не открывать позицию в тот же тик, что и закрытие (избежать мгновенного разворота)
+    SANDBOX_NO_OPEN_SWEEP_ONLY: bool = True  # не открывать, когда сигнал даёт по сути только sweep (защита от ловушек)
+    SANDBOX_SWEEP_DELAY_SEC: int = 20  # секунд после последнего sweep до разрешения входа (0 = выкл); снижает вход «в лоб» по sweep'у
+    SANDBOX_TREND_FILTER: bool = False  # True = не открывать позицию против тренда старшего ТФ
+    SANDBOX_LEVERAGE_MIN: float = 1.0  # минимальное плечо (1 = без плеча)
+    SANDBOX_LEVERAGE_MAX: float = 5.0  # максимальное плечо при адаптивном расчёте
+    SANDBOX_ADAPTIVE_LEVERAGE: bool = True  # True = плечо от уверенности сигнала и просадки
+    SANDBOX_MARGIN_FRACTION: float = 0.95  # доля эквити под маржу (0.95 = 95%); notional = margin * leverage
+    SANDBOX_LIQUIDATION_MAINTENANCE: float = 1.0  # ликвидация при убытке >= margin_used * это (1.0 = полная маржа)
+    SANDBOX_DRAWDOWN_LEVERAGE_PCT: float = 10.0  # при просадке от пика выше % — снижать макс. плечо вдвое
+    MICROSTRUCTURE_MIN_SCORE: float = 0.35  # минимальный |score| для long/short в сигнале; выше = чаще none, меньше лишних входов
+    # «Здесь и сейчас»: контекст по уровню + flow за короткое окно (как проп-трейдеры)
+    CONTEXT_NOW_LEVEL_DISTANCE_PCT: float = 0.0015  # цена в пределах этой доли от уровня = «у уровня» (0.0015 = 0.15%)
+    CONTEXT_NOW_DELTA_RATIO_MIN: float = 0.12  # порог delta_ratio в коротком окне для flow_bullish/flow_bearish
+    CONTEXT_NOW_USE_DOM_LEVELS: bool = False  # True = at_support/at_resistance по уровням стакана (DOM), иначе по trading_zones
+    SANDBOX_USE_CONTEXT_NOW_PRIMARY: bool = False  # True = вход только при at_support+flow_bullish / at_resistance+flow_bearish
+    SANDBOX_CONTEXT_NOW_ONLY: bool = False  # True = направление только из context_now (без сигнала микроструктуры), чисто проп-режим
 
     # --- Фазы ---
     PHASE_SCORE_MIN: float = 0.6
@@ -107,6 +145,8 @@ class _Settings(BaseSettings):
     BACKFILL_MAX_CANDLES: int = 50000
     DB_UPDATE_INTERVAL_SEC: float = 60.0
     AUTO_EXTEND_AT_STARTUP: bool = True
+    # Исторические данные для бэктеста (тики, стакан): пусто = data/history в корне проекта
+    HISTORY_DATA_DIR: str = ""
 
     # --- Логирование ---
     LOG_DIR: str = ""
@@ -147,6 +187,8 @@ SYMBOL = _settings.SYMBOL
 TIMEFRAMES = _parse_list(_settings.TIMEFRAMES)
 KLINE_LIMIT = _settings.KLINE_LIMIT
 POLL_INTERVAL_SEC = _settings.POLL_INTERVAL_SEC
+POLL_INTERVAL_ORDERFLOW_SEC = _settings.POLL_INTERVAL_ORDERFLOW_SEC
+POLL_INTERVAL_PROP_SEC = _settings.POLL_INTERVAL_PROP_SEC
 PHASE_SCORE_MIN = _settings.PHASE_SCORE_MIN
 PHASE_UNCLEAR_THRESHOLD = _settings.PHASE_UNCLEAR_THRESHOLD
 PHASE_MIN_GAP = _settings.PHASE_MIN_GAP
@@ -177,11 +219,44 @@ ENTRY_SCORE_WEIGHT_TF_ALIGN = _settings.ENTRY_SCORE_WEIGHT_TF_ALIGN
 CANDLE_QUALITY_MIN_SCORE = _settings.CANDLE_QUALITY_MIN_SCORE
 ORDERFLOW_ENABLED = _settings.ORDERFLOW_ENABLED
 ORDERFLOW_WINDOW_SEC = _settings.ORDERFLOW_WINDOW_SEC
+ORDERFLOW_SHORT_WINDOW_SEC = _settings.ORDERFLOW_SHORT_WINDOW_SEC
 ORDERFLOW_WS_PING_INTERVAL = _settings.ORDERFLOW_WS_PING_INTERVAL
 ORDERFLOW_WS_PING_TIMEOUT = _settings.ORDERFLOW_WS_PING_TIMEOUT
 ORDERFLOW_SAVE_TO_DB = _settings.ORDERFLOW_SAVE_TO_DB
 MICROSTRUCTURE_SANDBOX_ENABLED = _settings.MICROSTRUCTURE_SANDBOX_ENABLED
 SANDBOX_INITIAL_BALANCE = _settings.SANDBOX_INITIAL_BALANCE
+SANDBOX_TAKER_FEE = _settings.SANDBOX_TAKER_FEE
+SANDBOX_MIN_CONFIDENCE = _settings.SANDBOX_MIN_CONFIDENCE
+SANDBOX_COOLDOWN_SEC = _settings.SANDBOX_COOLDOWN_SEC
+SANDBOX_MIN_HOLD_SEC = _settings.SANDBOX_MIN_HOLD_SEC
+SANDBOX_EXIT_NONE_TICKS = _settings.SANDBOX_EXIT_NONE_TICKS
+SANDBOX_EXIT_MIN_CONFIDENCE = _settings.SANDBOX_EXIT_MIN_CONFIDENCE
+SANDBOX_MIN_CONFIRMING_TICKS = _settings.SANDBOX_MIN_CONFIRMING_TICKS
+SANDBOX_EXIT_WINDOW_TICKS = _settings.SANDBOX_EXIT_WINDOW_TICKS
+SANDBOX_EXIT_WINDOW_NEED = _settings.SANDBOX_EXIT_WINDOW_NEED
+SANDBOX_STOP_LOSS_PCT = _settings.SANDBOX_STOP_LOSS_PCT
+SANDBOX_BREAKEVEN_TRIGGER_PCT = _settings.SANDBOX_BREAKEVEN_TRIGGER_PCT
+SANDBOX_TAKE_PROFIT_PCT = _settings.SANDBOX_TAKE_PROFIT_PCT
+SANDBOX_TP_LEVELS = _settings.SANDBOX_TP_LEVELS
+SANDBOX_TRAIL_TRIGGER_PCT = _settings.SANDBOX_TRAIL_TRIGGER_PCT
+SANDBOX_TRAIL_PCT = _settings.SANDBOX_TRAIL_PCT
+SANDBOX_MIN_PROFIT_PCT = _settings.SANDBOX_MIN_PROFIT_PCT
+SANDBOX_NO_OPEN_SAME_TICK_AS_CLOSE = _settings.SANDBOX_NO_OPEN_SAME_TICK_AS_CLOSE
+SANDBOX_NO_OPEN_SWEEP_ONLY = _settings.SANDBOX_NO_OPEN_SWEEP_ONLY
+SANDBOX_SWEEP_DELAY_SEC = _settings.SANDBOX_SWEEP_DELAY_SEC
+CONTEXT_NOW_LEVEL_DISTANCE_PCT = _settings.CONTEXT_NOW_LEVEL_DISTANCE_PCT
+CONTEXT_NOW_DELTA_RATIO_MIN = _settings.CONTEXT_NOW_DELTA_RATIO_MIN
+CONTEXT_NOW_USE_DOM_LEVELS = _settings.CONTEXT_NOW_USE_DOM_LEVELS
+SANDBOX_USE_CONTEXT_NOW_PRIMARY = _settings.SANDBOX_USE_CONTEXT_NOW_PRIMARY
+SANDBOX_CONTEXT_NOW_ONLY = _settings.SANDBOX_CONTEXT_NOW_ONLY
+SANDBOX_TREND_FILTER = _settings.SANDBOX_TREND_FILTER
+SANDBOX_LEVERAGE_MIN = _settings.SANDBOX_LEVERAGE_MIN
+SANDBOX_LEVERAGE_MAX = _settings.SANDBOX_LEVERAGE_MAX
+SANDBOX_ADAPTIVE_LEVERAGE = _settings.SANDBOX_ADAPTIVE_LEVERAGE
+SANDBOX_MARGIN_FRACTION = _settings.SANDBOX_MARGIN_FRACTION
+SANDBOX_LIQUIDATION_MAINTENANCE = _settings.SANDBOX_LIQUIDATION_MAINTENANCE
+SANDBOX_DRAWDOWN_LEVERAGE_PCT = _settings.SANDBOX_DRAWDOWN_LEVERAGE_PCT
+MICROSTRUCTURE_MIN_SCORE = _settings.MICROSTRUCTURE_MIN_SCORE
 DATA_SOURCE = _settings.DATA_SOURCE
 SIGNAL_MIN_CONFIDENCE = _settings.SIGNAL_MIN_CONFIDENCE
 EXCHANGE_MAX_RETRIES = _settings.EXCHANGE_MAX_RETRIES
@@ -192,6 +267,8 @@ TIMEFRAMES_DB = _parse_list(_settings.TIMEFRAMES_DB)
 BACKFILL_MAX_CANDLES = _settings.BACKFILL_MAX_CANDLES
 DB_UPDATE_INTERVAL_SEC = _settings.DB_UPDATE_INTERVAL_SEC
 AUTO_EXTEND_AT_STARTUP = _settings.AUTO_EXTEND_AT_STARTUP
+_history_dir = (_settings.HISTORY_DATA_DIR or "").strip()
+HISTORY_DATA_DIR: Path = Path(_history_dir) if _history_dir else PROJECT_ROOT / "data" / "history"
 LOG_DIR = Path(_settings.LOG_DIR.strip()) if _settings.LOG_DIR.strip() else PROJECT_ROOT / "logs"
 LOG_LEVEL = _settings.LOG_LEVEL or "INFO"
 LOG_LEVEL_FILE = (_settings.LOG_LEVEL_FILE or "").strip() or LOG_LEVEL
