@@ -10,6 +10,20 @@
 
 ---
 
+## [2.9.0] — 2026-02-06
+
+Песочница: run_id и запись в БД, ревизия и чистка.
+
+### Добавлено
+
+- **Песочница: run_id и запись в БД** — при бэктесте и лайве создаётся run_id, таблицы sandbox_runs, sandbox_trades, sandbox_skips; отчёт `sandbox_backtest_report.py --db [--run-id ID] [--year]`. Правило `.cursor/rules/run-id-and-db-logging.mdc`.
+
+### Изменено
+
+- **Ревизия и чистка:** единая классификация exit_reason (sandbox_backtest_report использует _classify_exit_reason из microstructure_sandbox, дубликат удалён). Документация: bin/README (--db, --run-id), STRUCTURE.md (скрипты песочницы, БД sandbox_*), AGENT_CONTEXT (run_id, отчёт из БД), .cursorrules и trading-bot.mdc (раздел логов — run_id и БД).
+
+---
+
 ## [2.8.0] — 2026-02-01
 
 Order Flow, песочница микроструктуры, команда /sandbox в Telegram, таймауты WebSocket Bybit.

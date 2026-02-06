@@ -64,6 +64,24 @@ def main() -> None:
             trades_stream.start()
             logger.info("Order Flow включён: стакан и поток сделок запущены")
             if getattr(config, "MICROSTRUCTURE_SANDBOX_ENABLED", False):
+                from pathlib import Path
+                from datetime import datetime
+                _log_dir = getattr(config, "LOG_DIR", None)
+                if _log_dir is None:
+                    _log_dir = Path(__file__).resolve().parents[2] / "logs"
+                if isinstance(_log_dir, str):
+                    _log_dir = Path(_log_dir)
+                _log_dir.mkdir(parents=True, exist_ok=True)
+                _suffix = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                for _name in ("sandbox_result.txt", "sandbox_sessions.csv"):
+                    _path = _log_dir / _name
+                    if _path.exists() and _path.stat().st_size > 0:
+                        _archive = _path.parent / (_path.stem + f"_archive_{_suffix}" + _path.suffix)
+                        try:
+                            _path.rename(_archive)
+                            logger.info("Архив лога песочницы: %s → %s", _path.name, _archive.name)
+                        except OSError as _e:
+                            logger.debug("Не удалось архивировать %s: %s", _path, _e)
                 from .microstructure_sandbox import MicrostructureSandbox
                 initial_usd = float(getattr(config, "SANDBOX_INITIAL_BALANCE", 100) or 100)
                 taker_fee = float(getattr(config, "SANDBOX_TAKER_FEE", 0.0006) or 0.0006)
@@ -110,7 +128,20 @@ def main() -> None:
                 sweep_delay_sec = int(getattr(config, "SANDBOX_SWEEP_DELAY_SEC", 0) or 0)
                 use_context_now_primary = bool(getattr(config, "SANDBOX_USE_CONTEXT_NOW_PRIMARY", False))
                 use_context_now_only = bool(getattr(config, "SANDBOX_CONTEXT_NOW_ONLY", False))
+                _symbol = (getattr(config, "SYMBOL", None) or "BTCUSDT").strip().upper()
+                _run_id = f"live_{_symbol}_{int(time.time())}"
+                try:
+                    from ..core.database import get_connection, insert_sandbox_run
+                    _conn_run = get_connection()
+                    _cur = _conn_run.cursor()
+                    insert_sandbox_run(_cur, _run_id, _symbol, "live", initial_usd)
+                    _conn_run.commit()
+                    _conn_run.close()
+                except Exception as _e:
+                    logger.warning("Песочница: не удалось создать запись run в БД: %s", _e)
+                    _run_id = None
                 microstructure_sandbox = MicrostructureSandbox(
+                    run_id=_run_id,
                     initial_balance=initial_usd,
                     taker_fee=taker_fee,
                     min_confidence_to_open=min_conf,

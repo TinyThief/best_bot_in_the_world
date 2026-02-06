@@ -26,10 +26,16 @@ best_bot_in_the_world/
 │   ├── backtest_trend.py   # Бэктест точности модуля тренда
 │   ├── backtest_trade_2025.py  # Бэктест сценария управления сделкой за год (один ТФ или --all-tf)
 │   ├── compare_phase_methods.py  # Сравнение трёх методов фаз (Wyckoff / Indicators / PA)
-│   ├── test_run_once.py    # Один прогон мультиТФ-анализа (без цикла)
+│   ├── test_run_once.py    # Один прогон мультиТФ-анализа
+│   ├── test_zones.py       # Тест торговых зон
 │   ├── trend_daily_full.py # Тренд по всей БД ТФ D с визуализацией
-│   ├── trend_backtest_report.py  # Отчёт по бэктесту тренда (график точности)
-│   └── README.md          # Список команд bin/
+│   ├── trend_backtest_report.py  # Отчёт по бэктесту тренда
+│   ├── backtest_sandbox.py # Бэктест песочницы по тикам (--from/--to, --force)
+│   ├── sandbox_backtest_report.py  # Отчёт по песочнице (--year, --db, --run-id)
+│   ├── download_history.py # Загрузка тиков Bybit для бэктеста песочницы
+│   ├── orderbook_ws_demo.py # Демо стакана WebSocket
+│   ├── trades_ws_demo.py   # Демо потока сделок
+│   └── README.md
 │
 ├── [Конфиг и зависимости]
 ├── .env.example         # Шаблон .env (копируй в .env)
@@ -50,7 +56,7 @@ best_bot_in_the_world/
 ├── src/                 # Исходный код
 │   ├── core/            # Инфраструктура
 │   │   ├── config.py    # Конфиг из .env
-│   │   ├── database.py  # SQLite, klines + orderflow_metrics (метрики микроструктуры)
+│   │   ├── database.py  # SQLite: klines, orderflow_metrics, sandbox_runs/sandbox_trades/sandbox_skips (run_id)
 │   │   ├── db_helper.py # Умные выборки, кэш, дозаполнение пропусков
 │   │   ├── exchange.py  # Bybit API (свечи, фильтр OHLC)
 │   │   └── logging_config.py
@@ -64,6 +70,7 @@ best_bot_in_the_world/
 │   │   ├── main.py      # Цикл бота, db_sync, опционально Telegram
 │   │   ├── bot_loop.py  # Один тик: обновление БД + анализ + лог
 │   │   ├── db_sync.py   # Подготовка БД, refresh_if_due
+│   │   ├── microstructure_sandbox.py  # Песочница микроструктуры (run_id, запись в БД и CSV)
 │   │   └── telegram_bot.py    # Команды /signal, /zones, /momentum, /health, /chart, /trend_backtest, /trade_2025; inline Сигнал|Зоны|Импульс; алерт при смене сигнала
 │   ├── scripts/         # Скрипты (логика; точки входа — bin/)
 │   │   ├── accumulate_db.py
@@ -125,10 +132,12 @@ best_bot_in_the_world/
 | Бэктест точности фаз | `bin/backtest_phases.py` | `python bin/backtest_phases.py [--tf 60] [--bars N] [--tune]` |
 | Бэктест точности тренда | `bin/backtest_trend.py` | `python bin/backtest_trend.py` |
 | Бэктест сценария управления сделкой за год (сигнал + TP/SL) | `bin/backtest_trade_2025.py` | `python bin/backtest_trade_2025.py [--year 2025] [--tf 60]` или `--all-tf` |
+| Бэктест песочницы по тикам | `bin/backtest_sandbox.py` | `python bin/backtest_sandbox.py --from YYYY-MM-DD --to YYYY-MM-DD [--force]` |
+| Отчёт по песочнице (CSV или БД) | `bin/sandbox_backtest_report.py` | `python bin/sandbox_backtest_report.py [--year 2025]` или `--db [--run-id ID]` |
 | Сравнение методов фаз (Wyckoff / Indicators / PA) | `bin/compare_phase_methods.py` | `python bin/compare_phase_methods.py` |
 | Один прогон анализа (без цикла) | `bin/test_run_once.py` | `python bin/test_run_once.py` |
 
-Логика — в `src/scripts/backtest_phases.py`, `src/scripts/backtest_trend.py`, `src/scripts/backtest_trade_2025.py`, `src/scripts/compare_phase_methods.py`, `src/scripts/test_run_once.py`.
+Логика — в `src/scripts/backtest_phases.py`, `backtest_trend.py`, `backtest_trade_2025.py`, `backtest_sandbox.py`, `sandbox_backtest_report.py`, `compare_phase_methods.py`, `test_run_once.py`.
 
 ---
 

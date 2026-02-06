@@ -24,7 +24,8 @@ python bin/test_run_once.py
 python bin/test_zones.py
 python bin/orderbook_ws_demo.py [--depth 50]   # стакан по WebSocket до Ctrl+C; --duration N с, --log путь
 python bin/backtest_sandbox.py --from 2025-01-01 --to 2025-12-31 [--symbol BTCUSDT] [--tick-sec 15] [--window-sec 60] [--force]  # бэктест песочницы по тикам; пройденные диапазоны не повторяются (--force = запустить снова; --mark-done = только записать диапазон как пройденный)
-python bin/sandbox_backtest_report.py [--year 2025] [--trades путь]   # отчёт по бэктесту за год
+python bin/sandbox_backtest_report.py [--year 2025] [--trades путь]   # отчёт по CSV за год
+python bin/sandbox_backtest_report.py --db [--year 2025] [--run-id ID]   # отчёт из БД (по году или по run_id)
 python bin/sandbox_backtest_report.py --all   # сводка за 2023, 2024 и 2025 (или --years 2023,2024,2025)
 python bin/download_history.py                 # инструкции по загрузке исторических тиков Bybit
 python bin/download_history.py --list          # список уже скачанных файлов по SYMBOL

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,22 @@ def _get_skips_log_path() -> Path:
     return log_dir / "sandbox_skips.csv"
 
 
+def _archive_sandbox_csv_logs() -> None:
+    """
+    Архивирует текущие sandbox_trades.csv и sandbox_skips.csv перед новым прогоном,
+    чтобы не смешивать данные от разных сессий/бэктестов.
+    """
+    suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for path in (_get_trades_log_path(), _get_skips_log_path()):
+        if path.exists() and path.stat().st_size > 0:
+            archive = path.parent / (path.stem + f"_archive_{suffix}" + path.suffix)
+            try:
+                path.rename(archive)
+                logger.info("Архив лога песочницы: %s → %s", path.name, archive.name)
+            except OSError as e:
+                logger.warning("Не удалось архивировать %s: %s", path, e)
+
+
 def _append_trade_row(path: Path, row: dict[str, Any]) -> None:
     """Добавляет одну сделку в CSV (создаёт файл с заголовками при первом вызове)."""
     try:
@@ -192,7 +209,9 @@ class MicrostructureSandbox:
         sweep_delay_sec: int = 0,
         use_context_now_primary: bool = False,
         use_context_now_only: bool = False,
+        run_id: str | None = None,
     ):
+        self.run_id = run_id  # при заданном — сделки/пропуски пишутся ещё и в БД (sandbox_trades/sandbox_skips)
         self.initial_balance = initial_balance
         self.min_confidence_to_open = min_confidence_to_open
         self.taker_fee = max(0.0, float(taker_fee))
@@ -243,6 +262,7 @@ class MicrostructureSandbox:
         self.last_signal: dict[str, Any] = {}
         self.last_ts: int = 0
         self.trades: list[dict[str, Any]] = []  # все сделки для сводки
+        _archive_sandbox_csv_logs()
 
     def _compute_leverage(self, confidence: float, equity: float) -> float:
         """Адаптивное плечо: от уверенности сигнала и просадки от пика эквити."""
@@ -326,6 +346,16 @@ class MicrostructureSandbox:
         }
         self.trades.append(row)
         _append_trade_row(_get_trades_log_path(), row)
+        if self.run_id:
+            try:
+                from ..core.database import get_connection, insert_sandbox_trade
+                conn = get_connection()
+                cur = conn.cursor()
+                insert_sandbox_trade(cur, self.run_id, row)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.warning("Песочница: запись сделки в БД не удалась: %s", e)
         if action == "open":
             logger.info(
                 "Песочница open %s @ %s | conf=%.2f | %s | lev=%.2f | notional=$%.2f",
@@ -349,6 +379,16 @@ class MicrostructureSandbox:
             "skip_reason": skip_reason,
         }
         _append_skip_row(_get_skips_log_path(), row)
+        if self.run_id:
+            try:
+                from ..core.database import get_connection, insert_sandbox_skip
+                conn = get_connection()
+                cur = conn.cursor()
+                insert_sandbox_skip(cur, self.run_id, row)
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.warning("Песочница: запись пропуска в БД не удалась: %s", e)
 
     def update(
         self,

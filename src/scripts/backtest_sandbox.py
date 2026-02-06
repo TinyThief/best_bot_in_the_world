@@ -16,9 +16,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import time
+
+from ..analysis.market_trend import detect_trend
 from ..analysis.orderflow import analyze_orderflow, compute_volume_delta
 from ..app.microstructure_sandbox import MicrostructureSandbox
 from ..core import config
+from ..core.database import (
+    get_candles_before,
+    get_connection,
+    insert_sandbox_run,
+    update_sandbox_run_finished,
+)
 from ..history import iter_trades
 
 logger = logging.getLogger(__name__)
@@ -123,8 +132,8 @@ def _fake_orderbook_from_delta(mid: float, delta_ratio: float) -> dict[str, Any]
     }
 
 
-def _sandbox_from_config() -> MicrostructureSandbox:
-    """Создаёт MicrostructureSandbox с параметрами из конфига (как в main.py)."""
+def _sandbox_from_config(run_id: str | None = None) -> MicrostructureSandbox:
+    """Создаёт MicrostructureSandbox с параметрами из конфига (как в main.py). run_id — для записи сделок в БД."""
     initial_usd = float(getattr(config, "SANDBOX_INITIAL_BALANCE", 100) or 100)
     taker_fee = float(getattr(config, "SANDBOX_TAKER_FEE", 0.0006) or 0.0006)
     min_conf = float(getattr(config, "SANDBOX_MIN_CONFIDENCE", 0.4) or 0)
@@ -172,6 +181,7 @@ def _sandbox_from_config() -> MicrostructureSandbox:
     use_context_now_only = bool(getattr(config, "SANDBOX_CONTEXT_NOW_ONLY", False))
 
     return MicrostructureSandbox(
+        run_id=run_id,
         initial_balance=initial_usd,
         taker_fee=taker_fee,
         min_confidence_to_open=min_conf,
@@ -216,8 +226,28 @@ def run_backtest(
     """
     Реплей тиков за период: буфер сделок, каждые tick_sec секунд — окно window_sec,
     синтетический стакан из дельты, orderflow → sandbox.update(). Возвращает сводку.
+    При создании песочницы старые логи (trades/skips) автоматически архивируются.
+    Сделки пишутся в БД с run_id для отчётов по прогону.
     """
-    sandbox = _sandbox_from_config()
+    initial_usd = float(getattr(config, "SANDBOX_INITIAL_BALANCE", 100) or 100)
+    run_id = f"backtest_{symbol}_{date_from}_{date_to}_{int(time.time())}"
+    conn_run = get_connection()
+    try:
+        cur = conn_run.cursor()
+        insert_sandbox_run(
+            cur, run_id, symbol, "backtest", initial_usd,
+            date_from=date_from, date_to=date_to,
+        )
+        conn_run.commit()
+    finally:
+        conn_run.close()
+
+    sandbox = _sandbox_from_config(run_id=run_id)
+    trend_filter_enabled = bool(getattr(config, "SANDBOX_TREND_FILTER", False))
+    conn = get_connection() if trend_filter_enabled else None
+    trend_tf = "15"
+    trend_cache: dict[int, str] = {}  # bucket_15m -> "up"|"down"|"flat"
+
     window_ms = int(window_sec * 1000)
     tick_ms = tick_sec * 1000
 
@@ -263,17 +293,44 @@ def run_backtest(
                         last_trades_k=10,
                     )
                     ts_sec = next_tick_ms // 1000
-                    sandbox.update(of_result, mid, ts_sec, higher_tf_trend=None, context_now=None)
+                    higher_tf_trend: str | None = None
+                    if trend_filter_enabled and conn:
+                        bucket_15m = (ts_sec // 900) * 900
+                        if bucket_15m not in trend_cache:
+                            cur = conn.cursor()
+                            candles = get_candles_before(cur, symbol, trend_tf, ts_sec, limit=200)
+                            tr = detect_trend(candles) if candles else {}
+                            trend_cache[bucket_15m] = tr.get("direction", "flat")
+                        higher_tf_trend = trend_cache[bucket_15m]
+                    sandbox.update(of_result, mid, ts_sec, higher_tf_trend=higher_tf_trend, context_now=None)
                     ticks_done += 1
             next_tick_ms += tick_ms
         last_ts_ms = t_ms
+
+    if conn:
+        conn.close()
 
     if mid_prev <= 0 and buffer:
         mid_prev = buffer[-1].get("price") or 0.0
     equity = sandbox.equity(mid_prev) if mid_prev > 0 else sandbox.initial_balance
     summary = sandbox.get_summary(mid_prev) if mid_prev > 0 else {}
 
+    conn_run = get_connection()
+    try:
+        cur = conn_run.cursor()
+        update_sandbox_run_finished(
+            cur, run_id,
+            final_equity=equity,
+            total_pnl=sandbox.total_realized_pnl,
+            total_commission=sandbox.total_commission,
+            trades_count=len(sandbox.trades),
+        )
+        conn_run.commit()
+    finally:
+        conn_run.close()
+
     return {
+        "run_id": run_id,
         "symbol": symbol,
         "date_from": date_from,
         "date_to": date_to,

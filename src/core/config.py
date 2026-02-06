@@ -63,8 +63,8 @@ class _Settings(BaseSettings):
     MICROSTRUCTURE_SANDBOX_ENABLED: bool = False  # при True виртуальная торговля по сигналу микроструктуры (песочница)
     SANDBOX_INITIAL_BALANCE: float = 100.0  # стартовый виртуальный баланс в USD для песочницы микроструктуры
     SANDBOX_TAKER_FEE: float = 0.0006  # комиссия биржи (taker), доля от объёма; 0.0006 = 0.06% (Bybit linear)
-    SANDBOX_MIN_CONFIDENCE: float = 0.5  # минимальная уверенность сигнала для входа (0..1); выше = меньше сделок, комиссия не съедает депозит
-    SANDBOX_COOLDOWN_SEC: int = 120  # секунд после выхода до разрешения нового входа; снижает «пинг-понг»
+    SANDBOX_MIN_CONFIDENCE: float = 0.75  # минимальная уверенность сигнала для входа (0..1); выше = меньше сделок, комиссия не съедает депозит
+    SANDBOX_COOLDOWN_SEC: int = 300  # секунд после выхода до разрешения нового входа; снижает «пинг-понг»
     SANDBOX_MIN_HOLD_SEC: int = 120  # минимум секунд удержания позиции перед разрешением выхода по микроструктуре
     SANDBOX_EXIT_NONE_TICKS: int = 4  # тиков подряд с сигналом none/против — тогда закрыть; больше = меньше шума
     SANDBOX_EXIT_MIN_CONFIDENCE: float = 0.0  # выход при confidence ниже порога (0 = не использовать); трейлинг по микроструктуре
@@ -81,7 +81,7 @@ class _Settings(BaseSettings):
     SANDBOX_NO_OPEN_SAME_TICK_AS_CLOSE: bool = True  # не открывать позицию в тот же тик, что и закрытие (избежать мгновенного разворота)
     SANDBOX_NO_OPEN_SWEEP_ONLY: bool = True  # не открывать, когда сигнал даёт по сути только sweep (защита от ловушек)
     SANDBOX_SWEEP_DELAY_SEC: int = 20  # секунд после последнего sweep до разрешения входа (0 = выкл); снижает вход «в лоб» по sweep'у
-    SANDBOX_TREND_FILTER: bool = False  # True = не открывать позицию против тренда старшего ТФ
+    SANDBOX_TREND_FILTER: bool = True  # True = не открывать позицию против тренда старшего ТФ (long только при не bearish, short при не bullish)
     SANDBOX_LEVERAGE_MIN: float = 1.0  # минимальное плечо (1 = без плеча)
     SANDBOX_LEVERAGE_MAX: float = 5.0  # максимальное плечо при адаптивном расчёте
     SANDBOX_ADAPTIVE_LEVERAGE: bool = True  # True = плечо от уверенности сигнала и просадки
