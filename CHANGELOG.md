@@ -6,7 +6,15 @@
 
 ## [Unreleased]
 
-- *(пока пусто)*
+### Добавлено
+
+- **Подгрузка тиков:** модуль `src/history/trades_refill.py` — ensure_ticks(), refill_ticks_from_public(), refill_ticks_today_from_api(), get_missing_dates(); скачивание с public.bybit.com и подгрузка за сегодня через REST (get_recent_public_trades в exchange.py). Лаунчер `bin/refill_ticks.py` (--from/--to). `bin/download_history.py` использует общую логику скачивания из trades_refill.
+- **Пересмотр алгоритма сигнала микроструктуры:** при конфликте компонентов (delta/imbalance/sweep в разные стороны) — принудительно direction="none" (MICROSTRUCTURE_CONFLICT_MEANS_NONE). Требование минимум N согласных компонентов для long/short (MICROSTRUCTURE_REQUIRE_AGREEMENT_MIN, по умолчанию 2). Параметры формулы в конфиг: MICROSTRUCTURE_DELTA_RATIO_MIN, MICROSTRUCTURE_SWEEP_WEIGHT, MICROSTRUCTURE_CONFLICT_PENALTY, MICROSTRUCTURE_MIN_DELTA_IMBALANCE_CONFIRM, MICROSTRUCTURE_IMBALANCE_EPS. Пресет `.env.presets/sandbox_algorithm_rev1.env`.
+
+### Изменено
+
+- **Отчёт по бэктесту песочницы:** комиссия считается по всем строкам (open + close), а не только по close — итог совпадает с выводом бэктеста в терминале.
+- **Документация:** SANDBOX_ITERATIONS.md (п.5 пересмотр алгоритма, итерация 1, новая логика), SANDBOX_BACKTEST_RESULTS.md (прогоны 2026, algorithm rev 1 и новая логика), AGENT_CONTEXT (подгрузка тиков, состояние оптимизации песочницы).
 
 ---
 

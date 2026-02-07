@@ -238,6 +238,55 @@ def get_orderbook(
     }
 
 
+def get_recent_public_trades(
+    symbol: str | None = None,
+    category: str | None = None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """
+    Публичные сделки за последнее время (REST: последние limit сделок по паре).
+    Используется для подгрузки тиков «на сегодня», когда выгрузки с public.bybit.com ещё нет.
+    Возвращает список в формате для orderflow: T (ms), symbol, side, size, price, id, seq.
+    """
+    symbol = (symbol or config.SYMBOL or "").strip().upper()
+    category = category or config.BYBIT_CATEGORY
+    limit = max(1, min(1000, limit))
+
+    session = _session()
+    out = _request_with_retry(
+        session,
+        "get_public_trade_history",
+        category=category,
+        symbol=symbol,
+        limit=limit,
+    )
+    raw = out.get("result", {}).get("list") or []
+    result: list[dict[str, Any]] = []
+    for r in raw:
+        try:
+            t_ms = int(r.get("time", 0))
+            price = float(r.get("price", 0))
+            size = float(r.get("size", 0))
+            side = (r.get("side") or "Buy").strip()
+            if size <= 0 or price <= 0:
+                continue
+            result.append({
+                "T": t_ms,
+                "symbol": r.get("symbol", symbol),
+                "side": side,
+                "size": size,
+                "price": price,
+                "id": r.get("execId", ""),
+                "seq": int(r.get("seq", 0)),
+                "direction": r.get("direction", ""),
+            })
+        except (TypeError, ValueError, KeyError):
+            continue
+    # API отдаёт от новых к старым; для единообразия сортируем по T по возрастанию
+    result.sort(key=lambda x: x["T"])
+    return result
+
+
 def get_klines(
     symbol: str | None = None,
     interval: str = "15",

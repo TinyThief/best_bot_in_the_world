@@ -35,6 +35,8 @@ def compute_microstructure_signal(
     use_delta_trend: bool = True,
     handle_empty_data: bool = True,
     min_delta_imbalance_contrib_for_confirm: float = 0.05,
+    conflict_means_none: bool = True,
+    require_agreement_min: int = 2,
 ) -> dict[str, Any]:
     """
     Сигнал по микроструктуре: long / short / none, уверенность (0..1), reason, exit_hints.
@@ -51,6 +53,8 @@ def compute_microstructure_signal(
     delta_trend_weight: макс. вклад динамики дельты (вторая половина окна − первая).
     use_*: включение T&S, затухания sweep, штрафа за конфликт, стен, тренда дельты, обработки пустых данных.
     min_delta_imbalance_contrib_for_confirm: порог вклада delta/imbalance; если оба ниже — sweep_only=True (защита от ловушек).
+    conflict_means_none: при конфликте компонентов (разные знаки) принудительно direction="none", не входить.
+    require_agreement_min: минимум компонентов (delta, imbalance, sweep) с одним знаком для long/short; 0 = не проверять, 2 = по умолчанию нужны хотя бы два «за».
 
     Возвращает: direction, confidence, reason, sweep_only, details, exit_hints (список подсказок для выхода).
     """
@@ -153,6 +157,7 @@ def compute_microstructure_signal(
     confidence = abs(score)
 
     # --- 3. Конфликт компонентов ---
+    has_conflict = False
     if use_conflict_penalty and conflict_penalty > 0:
         signs = []
         if abs(delta_contrib) >= 0.05:
@@ -164,6 +169,7 @@ def compute_microstructure_signal(
         if abs(trend_contrib) >= 0.05:
             signs.append(1 if trend_contrib > 0 else -1)
         if len(signs) >= 2 and not all(s == signs[0] for s in signs):
+            has_conflict = True
             confidence = max(0.0, confidence * (1.0 - conflict_penalty))
 
     # --- 1. Time & Sales: всплеск объёма и низкий объём ---
@@ -195,6 +201,22 @@ def compute_microstructure_signal(
     else:
         direction = "none"
         reason = "микроструктура нейтральна (delta/imbalance/sweep/тренд не дают порога)"
+
+    # --- 7b. Алгоритм: при конфликте не входить ---
+    if conflict_means_none and has_conflict and direction != "none":
+        direction = "none"
+        reason = "конфликт компонентов (delta/imbalance/sweep в разные стороны)"
+
+    # --- 7c. Алгоритм: минимум N компонентов в одну сторону (иначе не входить) ---
+    if require_agreement_min >= 1 and direction != "none":
+        contribs = [(delta_contrib, 0.05), (imbalance_contrib, 0.05), (sweep_contrib, 0.05)]
+        if direction == "long":
+            agree = sum(1 for c, th in contribs if c >= th)
+        else:
+            agree = sum(1 for c, th in contribs if c <= -th)
+        if agree < require_agreement_min:
+            direction = "none"
+            reason = f"недостаточно согласованных компонентов (нужно {require_agreement_min}, есть {agree})"
 
     # --- 8a. Флаг «только sweep» (защита от ловушек: не входить по одному sweep без delta/imbalance) ---
     sweep_only = (

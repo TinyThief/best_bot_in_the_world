@@ -2,6 +2,7 @@
 
 Без --download: показывает URL, целевой каталог и список уже скачанных файлов.
 С --download: скачивает тики с public.bybit.com за диапазон дат в trades/{symbol}/{year}/ (папка на год).
+Использует общий модуль подгрузки тиков src.history.trades_refill.
 
 Запуск из корня:
   python bin/download_history.py [--list] [--mkdir] [--symbol BTCUSDT]
@@ -10,7 +11,6 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 import re
 import shutil
 import sys
@@ -23,58 +23,15 @@ sys.path.insert(0, str(_ROOT))
 
 from src.core import config
 from src.history.storage import get_history_root, get_trades_dir, list_trade_files, list_downloaded_trades
+from src.history.trades_refill import download_ticks_from_public
 
 BYBIT_HISTORY_URL = "https://www.bybit.com/derivatives/en/history-data"
-BYBIT_PUBLIC_TRADING_BASE = "https://public.bybit.com/trading/"
 
 DOWNLOAD_SLEEP_SEC = 1.0
-DOWNLOAD_MAX_RETRIES = 5
-DOWNLOAD_RETRY_BACKOFF_SEC = 1.0
-
-
-def _download_one_date(
-    symbol: str,
-    date_str: str,
-    out_dir: Path,
-) -> bool:
-    """Скачивает один день с public.bybit.com: .csv.gz → распаковка в .csv. Возвращает True при успехе."""
-    import requests
-
-    url = f"{BYBIT_PUBLIC_TRADING_BASE}{symbol}/{symbol}{date_str}.csv.gz"
-    out_csv = out_dir / f"{symbol}{date_str}.csv"
-    if out_csv.exists():
-        print(f"  {date_str}: уже есть {out_csv.name}, пропуск")
-        return True
-
-    last_error = None
-    for attempt in range(DOWNLOAD_MAX_RETRIES):
-        try:
-            r = requests.get(url, timeout=60, stream=True)
-            if r.status_code == 404:
-                print(f"  {date_str}: нет на сервере (404)")
-                return False
-            r.raise_for_status()
-            # Скачиваем в память, распаковываем в .csv
-            raw = r.content
-            if not raw:
-                print(f"  {date_str}: пустой ответ")
-                return False
-            decompressed = gzip.decompress(raw)
-            out_csv.write_bytes(decompressed)
-            print(f"  {date_str}: сохранён {out_csv.name}")
-            return True
-        except requests.RequestException as e:
-            last_error = e
-            if attempt < DOWNLOAD_MAX_RETRIES - 1:
-                delay = DOWNLOAD_RETRY_BACKOFF_SEC * (2**attempt)
-                print(f"  {date_str}: ошибка {e}, повтор через {delay:.0f} с...")
-                time.sleep(delay)
-    print(f"  {date_str}: не удалось после {DOWNLOAD_MAX_RETRIES} попыток: {last_error}")
-    return False
 
 
 def _run_download(symbol: str, date_from: str, date_to: str) -> None:
-    """Цикл по датам: скачать каждый день в папку года trades/{symbol}/{year}/."""
+    """Цикл по датам: скачать каждый день в папку года trades/{symbol}/{year}/ (через trades_refill)."""
     try:
         start = datetime.strptime(date_from, "%Y-%m-%d").date()
         end = datetime.strptime(date_to, "%Y-%m-%d").date()
@@ -97,11 +54,17 @@ def _run_download(symbol: str, date_from: str, date_to: str) -> None:
         date_str = current.strftime("%Y-%m-%d")
         year = date_str[:4]
         out_dir = get_trades_dir(symbol, year)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        if _download_one_date(symbol, date_str, out_dir):
+        out_csv = out_dir / f"{symbol}{date_str}.csv"
+        if out_csv.exists():
+            print(f"  {date_str}: уже есть {out_csv.name}, пропуск")
             ok += 1
         else:
-            fail += 1
+            if download_ticks_from_public(symbol, date_str, skip_existing=False):
+                print(f"  {date_str}: сохранён {out_csv.name}")
+                ok += 1
+            else:
+                print(f"  {date_str}: нет на сервере (404) или ошибка")
+                fail += 1
         current += timedelta(days=1)
         if current <= end:
             time.sleep(DOWNLOAD_SLEEP_SEC)

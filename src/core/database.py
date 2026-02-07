@@ -541,6 +541,33 @@ def get_sandbox_trades(
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
 
+def delete_sandbox_run_and_data(cursor: sqlite3.Cursor, run_id: str) -> None:
+    """Удаляет прогон и все его сделки/пропуски (для бракованных/незавершённых прогонов)."""
+    cursor.execute(f"DELETE FROM {SANDBOX_TRADES_TABLE} WHERE run_id = ?", (run_id,))
+    cursor.execute(f"DELETE FROM {SANDBOX_SKIPS_TABLE} WHERE run_id = ?", (run_id,))
+    cursor.execute(f"DELETE FROM {SANDBOX_RUNS_TABLE} WHERE run_id = ?", (run_id,))
+
+
+def delete_incomplete_sandbox_runs(
+    cursor: sqlite3.Cursor,
+    *,
+    source: str = "backtest",
+) -> int:
+    """
+    Удаляет из БД все незавершённые прогоны (finished_at_sec IS NULL) и их сделки/пропуски.
+    По умолчанию только source='backtest', чтобы не трогать лайв-сессии.
+    Возвращает число удалённых run_id.
+    """
+    cursor.execute(
+        f"SELECT run_id FROM {SANDBOX_RUNS_TABLE} WHERE finished_at_sec IS NULL AND source = ?",
+        (source,),
+    )
+    run_ids = [r[0] for r in cursor.fetchall()]
+    for rid in run_ids:
+        delete_sandbox_run_and_data(cursor, rid)
+    return len(run_ids)
+
+
 def get_sandbox_runs(
     cursor: sqlite3.Cursor,
     *,

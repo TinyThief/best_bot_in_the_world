@@ -23,6 +23,7 @@ from ..analysis.orderflow import analyze_orderflow, compute_volume_delta
 from ..app.microstructure_sandbox import MicrostructureSandbox
 from ..core import config
 from ..core.database import (
+    delete_incomplete_sandbox_runs,
     get_candles_before,
     get_connection,
     insert_sandbox_run,
@@ -228,7 +229,18 @@ def run_backtest(
     синтетический стакан из дельты, orderflow → sandbox.update(). Возвращает сводку.
     При создании песочницы старые логи (trades/skips) автоматически архивируются.
     Сделки пишутся в БД с run_id для отчётов по прогону.
+    Перед запуском из БД удаляются незавершённые бэктест-прогоны (бракованные/прерванные).
     """
+    conn_clean = get_connection()
+    try:
+        cur = conn_clean.cursor()
+        n = delete_incomplete_sandbox_runs(cur, source="backtest")
+        conn_clean.commit()
+        if n > 0:
+            logger.info("Удалено незавершённых бэктест-прогонов в БД: %s", n)
+    finally:
+        conn_clean.close()
+
     initial_usd = float(getattr(config, "SANDBOX_INITIAL_BALANCE", 100) or 100)
     run_id = f"backtest_{symbol}_{date_from}_{date_to}_{int(time.time())}"
     conn_run = get_connection()
@@ -244,6 +256,8 @@ def run_backtest(
 
     sandbox = _sandbox_from_config(run_id=run_id)
     trend_filter_enabled = bool(getattr(config, "SANDBOX_TREND_FILTER", False))
+    use_context_now_primary = bool(getattr(config, "SANDBOX_USE_CONTEXT_NOW_PRIMARY", False))
+    use_context_now_only = bool(getattr(config, "SANDBOX_CONTEXT_NOW_ONLY", False))
     conn = get_connection() if trend_filter_enabled else None
     trend_tf = "15"
     trend_cache: dict[int, str] = {}  # bucket_15m -> "up"|"down"|"flat"
@@ -302,7 +316,15 @@ def run_backtest(
                             tr = detect_trend(candles) if candles else {}
                             trend_cache[bucket_15m] = tr.get("direction", "flat")
                         higher_tf_trend = trend_cache[bucket_15m]
-                    sandbox.update(of_result, mid, ts_sec, higher_tf_trend=higher_tf_trend, context_now=None)
+                    # Синтетический context_now для бэктеста: разрешаем long при положительной дельте, short при отрицательной
+                    context_now: dict[str, Any] | None = None
+                    if use_context_now_primary or use_context_now_only:
+                        context_now = {
+                            "allowed_long": delta_ratio > 0.15,
+                            "allowed_short": delta_ratio < -0.15,
+                            "short_window_delta_ratio": delta_ratio,
+                        }
+                    sandbox.update(of_result, mid, ts_sec, higher_tf_trend=higher_tf_trend, context_now=context_now)
                     ticks_done += 1
             next_tick_ms += tick_ms
         last_ts_ms = t_ms
@@ -347,14 +369,16 @@ def run_backtest(
 
 def main() -> None:
     import argparse
+    from datetime import date, timedelta
 
     from ..core.logging_config import setup_logging
     setup_logging()
 
     parser = argparse.ArgumentParser(description="Бэктест песочницы микроструктуры по историческим тикам")
     parser.add_argument("--symbol", "-s", default="", help="Символ (по умолчанию из конфига)")
-    parser.add_argument("--from", dest="date_from", metavar="YYYY-MM-DD", required=True, help="Начало периода")
-    parser.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD", required=True, help="Конец периода")
+    parser.add_argument("--from", dest="date_from", metavar="YYYY-MM-DD", default="", help="Начало периода (обязательно с --to или укажи --last-months)")
+    parser.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD", default="", help="Конец периода (обязательно с --from или укажи --last-months)")
+    parser.add_argument("--last-months", type=int, metavar="N", default=None, help="Бэктест за последние N месяцев (вместо --from/--to)")
     parser.add_argument("--tick-sec", type=int, default=DEFAULT_TICK_SEC, help="Интервал тика в секундах (по умолчанию %s)" % DEFAULT_TICK_SEC)
     parser.add_argument("--window-sec", type=float, default=DEFAULT_WINDOW_SEC, help="Окно Order Flow в секундах (по умолчанию %s)" % DEFAULT_WINDOW_SEC)
     parser.add_argument("--short-window-sec", type=float, default=0, help="Короткое окно для context (0 = выкл)")
@@ -363,8 +387,22 @@ def main() -> None:
     args = parser.parse_args()
 
     symbol = (args.symbol or getattr(config, "SYMBOL", "BTCUSDT") or "BTCUSDT").strip().upper()
-    date_from = args.date_from.strip()
-    date_to = args.date_to.strip()
+
+    if args.last_months is not None:
+        if args.last_months < 1:
+            print("Ошибка: --last-months должен быть >= 1")
+            sys.exit(1)
+        end_date = date.today()
+        start_date = end_date - timedelta(days=args.last_months * 31)
+        date_from = start_date.isoformat()
+        date_to = end_date.isoformat()
+        logger.info("Период по --last-months %s: %s — %s", args.last_months, date_from, date_to)
+    elif args.date_from and args.date_to:
+        date_from = args.date_from.strip()
+        date_to = args.date_to.strip()
+    else:
+        print("Укажи период: --from YYYY-MM-DD --to YYYY-MM-DD или --last-months N")
+        sys.exit(1)
 
     if args.mark_done:
         _mark_range_done(symbol, date_from, date_to)

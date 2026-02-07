@@ -89,6 +89,14 @@ class _Settings(BaseSettings):
     SANDBOX_LIQUIDATION_MAINTENANCE: float = 1.0  # ликвидация при убытке >= margin_used * это (1.0 = полная маржа)
     SANDBOX_DRAWDOWN_LEVERAGE_PCT: float = 10.0  # при просадке от пика выше % — снижать макс. плечо вдвое
     MICROSTRUCTURE_MIN_SCORE: float = 0.35  # минимальный |score| для long/short в сигнале; выше = чаще none, меньше лишних входов
+    # Параметры формулы сигнала (п.5 пересмотр алгоритма); 0 = использовать дефолты в compute_microstructure_signal
+    MICROSTRUCTURE_DELTA_RATIO_MIN: float = 0.0  # порог |delta_ratio| для вклада в score; 0 = 0.15
+    MICROSTRUCTURE_SWEEP_WEIGHT: float = -1.0  # макс. вклад sweep в score (±); <0 = 0.3
+    MICROSTRUCTURE_CONFLICT_PENALTY: float = -1.0  # снижение confidence при конфликте компонентов; <0 = 0.25
+    MICROSTRUCTURE_MIN_DELTA_IMBALANCE_CONFIRM: float = -1.0  # порог вклада delta/imbalance для подтверждения (sweep_only); <0 = 0.05
+    MICROSTRUCTURE_IMBALANCE_EPS: float = -1.0  # порог отклонения imbalance от 0.5; <0 = 0.08
+    MICROSTRUCTURE_CONFLICT_MEANS_NONE: bool = True  # при конфликте компонентов не давать long/short (direction=none)
+    MICROSTRUCTURE_REQUIRE_AGREEMENT_MIN: int = -1  # минимум согласных компонентов (delta, imbalance, sweep); -1 = 2
     # «Здесь и сейчас»: контекст по уровню + flow за короткое окно (как проп-трейдеры)
     CONTEXT_NOW_LEVEL_DISTANCE_PCT: float = 0.0015  # цена в пределах этой доли от уровня = «у уровня» (0.0015 = 0.15%)
     CONTEXT_NOW_DELTA_RATIO_MIN: float = 0.12  # порог delta_ratio в коротком окне для flow_bullish/flow_bearish
@@ -257,6 +265,13 @@ SANDBOX_MARGIN_FRACTION = _settings.SANDBOX_MARGIN_FRACTION
 SANDBOX_LIQUIDATION_MAINTENANCE = _settings.SANDBOX_LIQUIDATION_MAINTENANCE
 SANDBOX_DRAWDOWN_LEVERAGE_PCT = _settings.SANDBOX_DRAWDOWN_LEVERAGE_PCT
 MICROSTRUCTURE_MIN_SCORE = _settings.MICROSTRUCTURE_MIN_SCORE
+MICROSTRUCTURE_DELTA_RATIO_MIN = _settings.MICROSTRUCTURE_DELTA_RATIO_MIN
+MICROSTRUCTURE_SWEEP_WEIGHT = _settings.MICROSTRUCTURE_SWEEP_WEIGHT
+MICROSTRUCTURE_CONFLICT_PENALTY = _settings.MICROSTRUCTURE_CONFLICT_PENALTY
+MICROSTRUCTURE_MIN_DELTA_IMBALANCE_CONFIRM = _settings.MICROSTRUCTURE_MIN_DELTA_IMBALANCE_CONFIRM
+MICROSTRUCTURE_IMBALANCE_EPS = _settings.MICROSTRUCTURE_IMBALANCE_EPS
+MICROSTRUCTURE_CONFLICT_MEANS_NONE = _settings.MICROSTRUCTURE_CONFLICT_MEANS_NONE
+MICROSTRUCTURE_REQUIRE_AGREEMENT_MIN = _settings.MICROSTRUCTURE_REQUIRE_AGREEMENT_MIN
 DATA_SOURCE = _settings.DATA_SOURCE
 SIGNAL_MIN_CONFIDENCE = _settings.SIGNAL_MIN_CONFIDENCE
 EXCHANGE_MAX_RETRIES = _settings.EXCHANGE_MAX_RETRIES

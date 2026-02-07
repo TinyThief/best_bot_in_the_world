@@ -157,6 +157,7 @@ def iter_trades(
     Итератор по тикам за период (для replay без загрузки всего в память).
     Фильтр по времени: ts_start_ms <= T < ts_end_ms (если заданы).
     Альтернативно по датам: date_from, date_to (YYYY-MM-DD).
+    Тики отдаются в хронологическом порядке по T (внутри файла и между файлами).
     """
     files = list_trade_files(symbol)
     for path, date_str in files:
@@ -165,7 +166,9 @@ def iter_trades(
             continue
         if date_to and d > date_to:
             continue
-        for t in parse_trades_csv(path, symbol):
+        chunk = parse_trades_csv(path, symbol)
+        chunk.sort(key=lambda x: x["T"])
+        for t in chunk:
             if ts_start_ms is not None and t["T"] < ts_start_ms:
                 continue
             if ts_end_ms is not None and t["T"] >= ts_end_ms:

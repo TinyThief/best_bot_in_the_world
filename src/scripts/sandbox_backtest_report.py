@@ -28,40 +28,48 @@ def _normalize_exit_reason(raw: str) -> str:
 
 
 def run_report(trades_path: Path, year: str) -> dict:
-    """Читает sandbox_trades.csv, фильтрует close за год, считает PnL и разбивку по exit_reason."""
+    """Читает sandbox_trades.csv: за год считает PnL по close, комиссию по всем строкам (open+close)."""
     total_pnl = 0.0
     total_commission = 0.0
     count = 0
+    winning_count = 0
     by_exit: dict[str, list[float]] = defaultdict(list)
 
     with open(trades_path, newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.reader(f)
         for row in reader:
-            if len(row) <= max(COL_ACTION, COL_REALIZED_PNL, COL_EXIT_REASON):
+            if len(row) <= max(COL_ACTION, COL_REALIZED_PNL, COL_EXIT_REASON, COL_COMMISSION):
                 continue
             ts_utc = row[COL_TS_UTC].strip()
             if not ts_utc.startswith(f"{year}-"):
                 continue
+            try:
+                comm = float(row[COL_COMMISSION].strip() or 0)
+            except ValueError:
+                comm = 0.0
+            total_commission += comm
             if row[COL_ACTION].strip().lower() != "close":
                 continue
             try:
                 pnl = float(row[COL_REALIZED_PNL].strip() or 0)
             except ValueError:
                 pnl = 0.0
-            try:
-                comm = float(row[COL_COMMISSION].strip() or 0)
-            except ValueError:
-                comm = 0.0
             total_pnl += pnl
-            total_commission += comm
             count += 1
+            if pnl > 0:
+                winning_count += 1
             reason = _normalize_exit_reason(row[COL_EXIT_REASON] if len(row) > COL_EXIT_REASON else "")
             by_exit[reason].append(pnl)
 
+    win_rate = (winning_count / count * 100.0) if count > 0 else 0.0
+    avg_pnl = (total_pnl / count) if count > 0 else 0.0
     return {
         "year": year,
         "trades_path": str(trades_path),
         "closes_count": count,
+        "winning_count": winning_count,
+        "win_rate": win_rate,
+        "avg_pnl": avg_pnl,
         "total_realized_pnl": total_pnl,
         "total_commission": total_commission,
         "net_pnl": total_pnl - total_commission,
@@ -96,35 +104,43 @@ def run_report_from_db(
     total_pnl = 0.0
     total_commission = 0.0
     count = 0
+    winning_count = 0
     by_exit: dict[str, list[float]] = defaultdict(list)
 
     for r in rows:
-        if (r.get("action") or "").strip().lower() != "close":
-            continue
         if year and r.get("ts_utc"):
             if not str(r["ts_utc"]).startswith(f"{year}-"):
                 continue
         try:
-            pnl = float(r.get("realized_pnl_usd") or 0)
-        except (TypeError, ValueError):
-            pnl = 0.0
-        try:
             comm = float(r.get("commission_usd") or 0)
         except (TypeError, ValueError):
             comm = 0.0
-        total_pnl += pnl
         total_commission += comm
+        if (r.get("action") or "").strip().lower() != "close":
+            continue
+        try:
+            pnl = float(r.get("realized_pnl_usd") or 0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        total_pnl += pnl
         count += 1
+        if pnl > 0:
+            winning_count += 1
         reason = _normalize_exit_reason(str(r.get("exit_reason") or ""))
         by_exit[reason].append(pnl)
 
     label = f"run_id={run_id}" if run_id else f"year={year or 'all'}"
+    win_rate = (winning_count / count * 100.0) if count > 0 else 0.0
+    avg_pnl = (total_pnl / count) if count > 0 else 0.0
     return {
         "year": year or "",
         "run_id": run_id,
         "source": "db",
         "trades_path": label,
         "closes_count": count,
+        "winning_count": winning_count,
+        "win_rate": win_rate,
+        "avg_pnl": avg_pnl,
         "total_realized_pnl": total_pnl,
         "total_commission": total_commission,
         "net_pnl": total_pnl - total_commission,
@@ -154,14 +170,17 @@ def main() -> None:
                 years = ["2023", "2024", "2025"]
             results = [run_report_from_db(year=y) for y in years]
             print("Отчёт по бэктесту песочницы (БД, сводка по годам)")
-            print("-" * 60)
+            print("-" * 80)
             total_closes = sum(r["closes_count"] for r in results)
+            total_winning = sum(r.get("winning_count", 0) for r in results)
             total_pnl = sum(r["total_realized_pnl"] for r in results)
             total_comm = sum(r["total_commission"] for r in results)
+            overall_win_rate = (total_winning / total_closes * 100.0) if total_closes > 0 else 0.0
             for r in results:
-                print(f"{r['year']}: закрытий={r['closes_count']}, гросс=${r['total_realized_pnl']:.2f}, комиссия=${r['total_commission']:.2f}, нетто=${r['net_pnl']:.2f}")
-            print("-" * 60)
-            print(f"Итого: закрытий={total_closes}, гросс=${total_pnl:.2f}, комиссия=${total_comm:.2f}, нетто=${total_pnl - total_comm:.2f}")
+                win_rate_str = f", WR={r.get('win_rate', 0.0):.1f}%" if r.get('win_rate') is not None else ""
+                print(f"{r['year']}: закрытий={r['closes_count']}{win_rate_str}, гросс=${r['total_realized_pnl']:.2f}, комиссия=${r['total_commission']:.2f}, нетто=${r['net_pnl']:.2f}")
+            print("-" * 80)
+            print(f"Итого: закрытий={total_closes}, WR={overall_win_rate:.1f}%, гросс=${total_pnl:.2f}, комиссия=${total_comm:.2f}, нетто=${total_pnl - total_comm:.2f}")
         else:
             if run_id:
                 result = run_report_from_db(run_id=run_id)
@@ -169,6 +188,8 @@ def main() -> None:
                 result = run_report_from_db(year=year or "2025")
             print(f"Отчёт по бэктесту песочницы (БД) {result['trades_path']}")
             print(f"Закрытий (close): {result['closes_count']}")
+            print(f"Win rate: {result.get('win_rate', 0.0):.1f}% ({result.get('winning_count', 0)} из {result['closes_count']})")
+            print(f"Средний PnL на сделку: ${result.get('avg_pnl', 0.0):.2f}")
             print(f"Реализованный PnL: ${result['total_realized_pnl']:.2f}")
             print(f"Комиссия: ${result['total_commission']:.2f}")
             print(f"Чистый PnL: ${result['net_pnl']:.2f}")
@@ -192,17 +213,21 @@ def main() -> None:
         results = [run_report(trades_path, y) for y in years]
         print("Отчёт по бэктесту песочницы (сводка по годам)")
         print(f"Файл: {trades_path}")
-        print("-" * 60)
+        print("-" * 80)
         total_closes = 0
+        total_winning = 0
         total_pnl = 0.0
         total_comm = 0.0
         for r in results:
             total_closes += r["closes_count"]
+            total_winning += r.get("winning_count", 0)
             total_pnl += r["total_realized_pnl"]
             total_comm += r["total_commission"]
-            print(f"{r['year']}: закрытий={r['closes_count']}, гросс=${r['total_realized_pnl']:.2f}, комиссия=${r['total_commission']:.2f}, нетто=${r['net_pnl']:.2f}")
-        print("-" * 60)
-        print(f"Итого: закрытий={total_closes}, гросс=${total_pnl:.2f}, комиссия=${total_comm:.2f}, нетто=${total_pnl - total_comm:.2f}")
+            win_rate_str = f", WR={r.get('win_rate', 0.0):.1f}%" if r.get('win_rate') is not None else ""
+            print(f"{r['year']}: закрытий={r['closes_count']}{win_rate_str}, гросс=${r['total_realized_pnl']:.2f}, комиссия=${r['total_commission']:.2f}, нетто=${r['net_pnl']:.2f}")
+        print("-" * 80)
+        overall_win_rate = (total_winning / total_closes * 100.0) if total_closes > 0 else 0.0
+        print(f"Итого: закрытий={total_closes}, WR={overall_win_rate:.1f}%, гросс=${total_pnl:.2f}, комиссия=${total_comm:.2f}, нетто=${total_pnl - total_comm:.2f}")
         return
 
     year = args.year.strip() or "2025"
@@ -211,6 +236,8 @@ def main() -> None:
     print(f"Отчёт по бэктесту песочницы за {result['year']}")
     print(f"Файл: {result['trades_path']}")
     print(f"Закрытий (close): {result['closes_count']}")
+    print(f"Win rate: {result.get('win_rate', 0.0):.1f}% ({result.get('winning_count', 0)} из {result['closes_count']})")
+    print(f"Средний PnL на сделку: ${result.get('avg_pnl', 0.0):.2f}")
     print(f"Реализованный PnL: ${result['total_realized_pnl']:.2f}")
     print(f"Комиссия: ${result['total_commission']:.2f}")
     print(f"Чистый PnL (после комиссии): ${result['net_pnl']:.2f}")

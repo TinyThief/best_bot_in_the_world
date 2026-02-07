@@ -1,4 +1,7 @@
-"""Точка входа: бэктест песочницы микроструктуры по историческим тикам. Запуск из корня: python bin/backtest_sandbox.py --from 2025-01-01 --to 2025-12-31 [--symbol BTCUSDT] [--tick-sec 15] [--window-sec 60]"""
+"""Точка входа: бэктест песочницы по историческим тикам. Запуск из корня:
+  python bin/backtest_sandbox.py --last-months 4 [--force]
+  python bin/backtest_sandbox.py --from 2025-01-01 --to 2025-12-31 [--symbol BTCUSDT] [--tick-sec 15] [--window-sec 60]
+"""
 import sys
 from pathlib import Path
 

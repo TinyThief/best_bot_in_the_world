@@ -38,14 +38,36 @@ def get_trades_dir(symbol: str, year: str | None = None) -> Path:
     return base
 
 
+def _normalize_date_for_sort(date_str: str) -> tuple[int, int, int]:
+    """Преобразует date_str (YYYY-MM-DD или YYYYMMDD) в (year, month, day) для сортировки. Иначе (0,0,0)."""
+    date_str = (date_str or "").strip()
+    # YYYY-MM-DD
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", date_str)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    # YYYYMMDD (8 цифр подряд)
+    m = re.search(r"(\d{4})(\d{2})(\d{2})(?:\D|$)", date_str)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return (y, mo, d)
+    return (0, 0, 0)
+
+
 def _extract_date_from_path(p: Path) -> str:
-    """Из имени файла извлечь date_str (YYYY-MM-DD) для сортировки."""
+    """Из имени файла извлечь date_str (YYYY-MM-DD) для сортировки. Поддержка YYYY-MM-DD и YYYYMMDD."""
     stem = p.stem
     if p.suffix == ".gz" and stem.endswith(".csv"):
         stem = stem[:-4]
     match = re.search(r"(\d{4}-\d{2}-\d{2})", stem)
     if match:
         return match.group(1)
+    # YYYYMMDD без дефисов (например BTCUSDT20230108)
+    match = re.search(r"(\d{4})(\d{2})(\d{2})(?:\D|$)", stem)
+    if match:
+        y, mo, d = match.group(1), match.group(2), match.group(3)
+        if 1 <= int(mo) <= 12 and 1 <= int(d) <= 31:
+            return f"{y}-{mo}-{d}"
     for sep in ("-", "_"):
         if sep in stem:
             parts = stem.split(sep)
@@ -79,7 +101,8 @@ def list_trade_files(symbol: str) -> list[tuple[Path, str]]:
                 collect_from(p)
 
     collect_from(dir_path)
-    out.sort(key=lambda x: x[1])
+    # Сортировка по реальной дате (год, месяц, день), затем по пути — чтобы порядок тиков был строго хронологическим
+    out.sort(key=lambda x: (_normalize_date_for_sort(x[1]), str(x[0])))
     return out
 
 

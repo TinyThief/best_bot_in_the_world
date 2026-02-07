@@ -131,9 +131,17 @@ def _get_skips_log_path() -> Path:
 
 def _archive_sandbox_csv_logs() -> None:
     """
-    Архивирует текущие sandbox_trades.csv и sandbox_skips.csv перед новым прогоном,
-    чтобы не смешивать данные от разных сессий/бэктестов.
+    Удаляет старые архивы (бракованные/незаконченные прогоны), затем архивирует текущие
+    sandbox_trades.csv и sandbox_skips.csv перед новым прогоном.
     """
+    log_dir = _get_trades_log_path().parent
+    for stem in ("sandbox_trades", "sandbox_skips"):
+        for p in log_dir.glob(f"{stem}_archive_*.*"):
+            try:
+                p.unlink()
+                logger.info("Удалён старый архив песочницы: %s", p.name)
+            except OSError as e:
+                logger.warning("Не удалось удалить архив %s: %s", p, e)
     suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
     for path in (_get_trades_log_path(), _get_skips_log_path()):
         if path.exists() and path.stat().st_size > 0:
@@ -150,7 +158,7 @@ def _append_trade_row(path: Path, row: dict[str, Any]) -> None:
     try:
         file_exists = path.exists()
         with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=TRADES_CSV_HEADERS)
+            w = csv.DictWriter(f, fieldnames=TRADES_CSV_HEADERS, quoting=csv.QUOTE_NONNUMERIC)
             if not file_exists:
                 w.writeheader()
             w.writerow({k: row.get(k, "") for k in TRADES_CSV_HEADERS})
@@ -163,7 +171,7 @@ def _append_skip_row(path: Path, row: dict[str, Any]) -> None:
     try:
         file_exists = path.exists()
         with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=SKIPS_CSV_HEADERS)
+            w = csv.DictWriter(f, fieldnames=SKIPS_CSV_HEADERS, quoting=csv.QUOTE_NONNUMERIC)
             if not file_exists:
                 w.writeheader()
             w.writerow({k: row.get(k, "") for k in SKIPS_CSV_HEADERS})
@@ -410,12 +418,26 @@ class MicrostructureSandbox:
         from ..core import config as _config
 
         min_score = float(getattr(_config, "MICROSTRUCTURE_MIN_SCORE", 0.25))
-        signal = compute_microstructure_signal(
-            of_result,
-            min_score_for_direction=min_score,
-            current_price=current_price,
-            now_ts_sec=ts_sec,
-        )
+        kw: dict[str, Any] = {
+            "min_score_for_direction": min_score,
+            "current_price": current_price,
+            "now_ts_sec": ts_sec,
+        }
+        if getattr(_config, "MICROSTRUCTURE_DELTA_RATIO_MIN", 0) > 0:
+            kw["delta_ratio_min"] = float(_config.MICROSTRUCTURE_DELTA_RATIO_MIN)
+        if getattr(_config, "MICROSTRUCTURE_SWEEP_WEIGHT", -1) >= 0:
+            kw["sweep_weight"] = float(_config.MICROSTRUCTURE_SWEEP_WEIGHT)
+        if getattr(_config, "MICROSTRUCTURE_CONFLICT_PENALTY", -1) >= 0:
+            kw["conflict_penalty"] = float(_config.MICROSTRUCTURE_CONFLICT_PENALTY)
+        if getattr(_config, "MICROSTRUCTURE_MIN_DELTA_IMBALANCE_CONFIRM", -1) >= 0:
+            kw["min_delta_imbalance_contrib_for_confirm"] = float(_config.MICROSTRUCTURE_MIN_DELTA_IMBALANCE_CONFIRM)
+        if getattr(_config, "MICROSTRUCTURE_IMBALANCE_EPS", -1) >= 0:
+            kw["imbalance_eps"] = float(_config.MICROSTRUCTURE_IMBALANCE_EPS)
+        kw["conflict_means_none"] = bool(getattr(_config, "MICROSTRUCTURE_CONFLICT_MEANS_NONE", True))
+        req_agree = getattr(_config, "MICROSTRUCTURE_REQUIRE_AGREEMENT_MIN", -1)
+        if req_agree >= 0:
+            kw["require_agreement_min"] = int(req_agree)
+        signal = compute_microstructure_signal(of_result, **kw)
         self.last_signal = signal
         self.last_ts = ts_sec
         direction = signal.get("direction", "none")

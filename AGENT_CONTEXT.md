@@ -40,7 +40,7 @@
 
 ## В процессе (IN PROGRESS)
 
-- *Пока пусто. Сюда добавлять задачи, над которыми идёт работа.*
+- **Оптимизация песочницы микроструктуры до готовности к проду:** итеративная настройка и пересмотр алгоритма по результатам бэктеста. Baseline и Варианты 1–2 не достигли критериев (net > 0, win rate ≥ 55%). Выполнены: п.1 (context_now primary), п.5.1 (параметры формулы в конфиг, пресет `sandbox_algorithm_rev1.env`), **изменения в логике алгоритма** — при конфликте компонентов direction=none (`MICROSTRUCTURE_CONFLICT_MEANS_NONE`), минимум 2 согласных компонента для long/short (`MICROSTRUCTURE_REQUIRE_AGREEMENT_MIN`). Подгрузка тиков: `src/history/trades_refill.py` (ensure_ticks, refill с public.bybit.com и REST API за сегодня), `bin/refill_ticks.py`. Отчёт по сделкам учитывает комиссию open+close. Документы: `docs/SANDBOX_BACKTEST_RESULTS.md`, `docs/SANDBOX_ITERATIONS.md`, пресеты в `.env.presets/`. Следующий шаг: снять отчёт по последнему прогону с новой логикой, сравнить число сделок и net PnL; при улучшении — расширить период или п.5.2/п.2.
 
 ---
 
@@ -103,6 +103,7 @@
 | Онбординг человека | ДЛЯ_КОМАНДЫ.md |
 | Проверка работоспособности, выбросы цен в БД (BTC) | check_all.py (в корне), `python check_all.py [--quick] [-v]` |
 | Бэктест песочницы по тикам, отчёт по годам/run_id, тики | bin/backtest_sandbox.py (--from/--to, --force), bin/sandbox_backtest_report.py (--year, --db, --run-id), bin/download_history.py; БД: sandbox_runs, sandbox_trades, sandbox_skips; logs/sandbox_backtest_completed.json |
+| Подгрузка недостающих тиков | src/history/trades_refill.py (ensure_ticks, refill_ticks_from_public, refill_ticks_today_from_api), bin/refill_ticks.py (--from/--to); exchange.get_recent_public_trades |
 
 ---
 
